@@ -330,7 +330,14 @@ class OCRService {
       'samedi': 'SAM',
     };
 
-    final markPatterns = ['X', 'x', '/', '\\', 'A', 'a'];
+    final markPatterns = [
+      'X', 'x',
+      '/', '\\',
+      'A', 'a',
+      '✕', '✗', '✘',
+      '×', 'χ',
+      '⃠',
+    ];
     
     final sortedLines = List<TextLine>.from(allLines)
       ..sort((a, b) => a.boundingBox.center.dy.compareTo(b.boundingBox.center.dy));
@@ -345,7 +352,7 @@ class OCRService {
       
       if (hasNumber && !hasDayHeader) {
         nameLines.add(line);
-      } else if (!hasDayHeader && line.text.contains(RegExp(r'[Xxa/\\]'))) {
+      } else if (!hasDayHeader && line.text.contains(RegExp(r'[Xxa/\\✕✗✘×χ⃠]'))) {
         markLines.add(line);
       }
     }

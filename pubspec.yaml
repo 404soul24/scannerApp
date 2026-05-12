@@ -25,6 +25,18 @@ dependencies:
   # Local storage for scan history
   shared_preferences: ^2.3.5
 
+  # File path access for export
+  path_provider: ^2.1.5
+
+  # PDF generation
+  pdf: ^3.11.2
+
+  # CSV export
+  csv: ^6.0.0
+
+  # File picker for import
+  file_picker: ^8.1.7
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -1,7 +1,12 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:csv/csv.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:file_picker/file_picker.dart';
 import 'ocr_service.dart';
 import 'models/absence_record.dart';
 import 'services/storage_service.dart';
@@ -68,7 +73,8 @@ class _ScannerScreenState extends State<ScannerScreen>
   String _rawText = '';
   File? _selectedImage;
   List<WeeklyScanSession> _history = [];
-  int _minutesPerSlot = 30;
+  String _searchQuery = '';
+  bool _showOnlyAbsences = false;
 
   late AnimationController _pulseController;
 
@@ -80,7 +86,6 @@ class _ScannerScreenState extends State<ScannerScreen>
       duration: const Duration(seconds: 2),
     )..repeat(reverse: true);
     _loadHistory();
-    _loadSettings();
   }
 
   @override
@@ -90,26 +95,24 @@ class _ScannerScreenState extends State<ScannerScreen>
     super.dispose();
   }
 
-  Future<void> _loadSettings() async {
-    final minutes = await _storageService.getMinutesPerSlot();
-    setState(() => _minutesPerSlot = minutes);
-  }
-
   Future<void> _loadHistory() async {
     final history = await _storageService.loadHistory();
     setState(() => _history = history);
   }
 
-  Future<void> _saveToHistory() async {
-    if (_students.isEmpty) return;
-    final session = WeeklyScanSession(
-      scanDate: DateTime.now(),
-      students: List.from(_students),
-      minutesPerSlot: _minutesPerSlot,
-      rawText: _rawText,
-    );
+  Future<void> _saveToHistory(WeeklyScanSession session) async {
     await _storageService.saveToHistory(session);
     _loadHistory();
+  }
+
+  void _deleteHistoryItem(int index) async {
+    await _storageService.deleteHistoryItem(index);
+    _loadHistory();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Élément supprimé')),
+      );
+    }
   }
 
   void _clearHistory() async {
@@ -122,14 +125,46 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
   }
 
-  Future<void> _showSettings() async {
-    final result = await showDialog<int>(
-      context: context,
-      builder: (ctx) => _SettingsDialog(initialMinutes: _minutesPerSlot),
-    );
-    if (result != null && result != _minutesPerSlot) {
-      setState(() => _minutesPerSlot = result);
-      await _storageService.setMinutesPerSlot(result);
+  Future<void> _exportHistory() async {
+    try {
+      final path = await _storageService.exportHistoryToJson();
+      await Share.shareXFiles([XFile(path)], subject: 'Export absences');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Export réussi')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export échoué: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _importHistory() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['json'],
+      );
+      
+      if (result != null && result.files.single.path != null) {
+        final count = await _storageService.importHistoryFromJson(result.files.single.path!);
+        _loadHistory();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('$count éléments importés')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Import échoué: $e')),
+        );
+      }
     }
   }
 
@@ -164,7 +199,9 @@ class _ScannerScreenState extends State<ScannerScreen>
         _isProcessing = false;
       });
 
-      _saveToHistory();
+      if (_students.isNotEmpty) {
+        _showVerificationScreen();
+      }
     } catch (e) {
       setState(() => _isProcessing = false);
       if (mounted) {
@@ -178,18 +215,48 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
   }
 
+  void _showVerificationScreen() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (ctx) => VerificationScreen(
+          students: List.from(_students),
+          image: _selectedImage,
+          rawText: _rawText,
+          onSave: (students) {
+            setState(() => _students = students);
+            final session = WeeklyScanSession(
+              scanDate: DateTime.now(),
+              students: students,
+              rawText: _rawText,
+            );
+            _saveToHistory(session);
+          },
+          onCancel: () {
+            setState(() {
+              _students = [];
+              _rawText = '';
+              _selectedImage = null;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
   Future<void> _shareResults() async {
     if (_students.isEmpty) return;
     final buffer = StringBuffer();
     buffer.writeln('Absences hebdomadaire');
-    buffer.writeln('Durée par case: $_minutesPerSlot min');
+    buffer.writeln('Durée par case: 150 min (2h30)');
     buffer.writeln('');
 
     for (final student in _students) {
-      final total = student.formatTotalDuration(_minutesPerSlot);
+      if (!student.hasAnyAbsence) continue;
+      final total = student.formatTotalDuration();
       buffer.writeln('${student.number}. ${student.name} - $total');
       for (final day in student.week) {
-        final mins = day.getTotalMinutes(_minutesPerSlot);
+        final mins = day.getTotalMinutes();
         if (mins > 0) {
           final hours = mins ~/ 60;
           final min = mins % 60;
@@ -203,31 +270,110 @@ class _ScannerScreenState extends State<ScannerScreen>
     await Share.share(buffer.toString(), subject: "Absences Hebdomadaire");
   }
 
-  void _updateStudentMinutes(int studentIndex, int dayIndex, int slotIndex, bool isMarked, String markType) {
-    setState(() {
-      _students[studentIndex].week[dayIndex].slots[slotIndex] = AbsenceSlot(
-        isMarked: isMarked,
-        markType: markType,
+  Future<void> _exportToCsv() async {
+    if (_students.isEmpty) return;
+    
+    final rows = <List<dynamic>>[
+      ['N°', 'Nom', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'Total Heures'],
+    ];
+    
+    for (final student in _students) {
+      final row = <dynamic>[
+        student.number,
+        student.name,
+      ];
+      
+      for (final day in student.week) {
+        row.add(day.markedCount > 0 ? '${day.markedCount}x (${day.getDisplayMarks()})' : '-');
+      }
+      
+      final total = student.formatTotalDuration();
+      row.add(total);
+      
+      rows.add(row);
+    }
+    
+    final csv = const ListToCsvConverter().convert(rows);
+    final directory = await getApplicationDocumentsDirectory();
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final file = File('${directory.path}/absences_$timestamp.csv');
+    await file.writeAsString(csv);
+    
+    await Share.shareXFiles([XFile(file.path)], subject: 'Export CSV');
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Export CSV réussi')),
       );
-    });
+    }
   }
 
-  void _toggleDayPresent(int studentIndex, int dayIndex) {
-    setState(() {
-      final day = _students[studentIndex].week[dayIndex];
-      bool allPresent = true;
-      for (var slot in day.slots) {
-        if (slot.isMarked) {
-          allPresent = false;
-          break;
-        }
-      }
-      final newMarked = !allPresent;
-      final mark = newMarked ? 'X' : '';
-      _students[studentIndex].week[dayIndex] = day.copyWith(
-        slots: List.generate(4, (_) => AbsenceSlot(isMarked: newMarked, markType: newMarked ? mark : '')),
+  Future<void> _exportToPdf() async {
+    if (_students.isEmpty) return;
+    
+    final pdf = pw.Document();
+    
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        build: (context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Header(
+                level: 0,
+                child: pw.Text('Feuille d\'Absences Hebdomadaire', 
+                  style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+              ),
+              pw.SizedBox(height: 10),
+              pw.Text('Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}'),
+              pw.Text('Durée par case: 2h30 (150 min)'),
+              pw.SizedBox(height: 20),
+              pw.Table.fromTextArray(
+                headers: ['N°', 'Nom', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'Total'],
+                data: _students.where((s) => s.hasAnyAbsence).map((student) {
+                  return [
+                    student.number.toString(),
+                    student.name,
+                    student.week[0].markedCount.toString(),
+                    student.week[1].markedCount.toString(),
+                    student.week[2].markedCount.toString(),
+                    student.week[3].markedCount.toString(),
+                    student.week[4].markedCount.toString(),
+                    student.week[5].markedCount.toString(),
+                    student.formatTotalDuration(),
+                  ];
+                }).toList(),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    
+    final directory = await getApplicationDocumentsDirectory();
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final file = File('${directory.path}/absences_$timestamp.pdf');
+    await file.writeAsBytes(await pdf.save());
+    
+    await Share.shareXFiles([XFile(file.path)], subject: 'Export PDF');
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Export PDF réussi')),
       );
-    });
+    }
+  }
+
+  void _showStatistics() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _StatisticsSheet(students: _students, history: _history),
+    );
   }
 
   Future<ImageSource?> _showImageSourceSheet() async {
@@ -267,7 +413,6 @@ class _ScannerScreenState extends State<ScannerScreen>
                     child: const Icon(Icons.camera_alt_rounded, color: Color(0xFF00BFA6)),
                   ),
                   title: const Text('Prendre une photo', style: TextStyle(color: Colors.white)),
-                  subtitle: const Text("Utilisez l'appareil photo", style: TextStyle(color: Colors.white54)),
                   onTap: () => Navigator.pop(ctx, ImageSource.camera),
                 ),
                 const SizedBox(height: 8),
@@ -281,7 +426,6 @@ class _ScannerScreenState extends State<ScannerScreen>
                     child: const Icon(Icons.photo_library_rounded, color: Color(0xFF448AFF)),
                   ),
                   title: const Text('Choisir dans la galerie', style: TextStyle(color: Colors.white)),
-                  subtitle: const Text('Sélectionner une image', style: TextStyle(color: Colors.white54)),
                   onTap: () => Navigator.pop(ctx, ImageSource.gallery),
                 ),
               ],
@@ -290,6 +434,80 @@ class _ScannerScreenState extends State<ScannerScreen>
         );
       },
     );
+  }
+
+  void _showDataManagement() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Gestion des données',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white),
+              ),
+              const SizedBox(height: 20),
+              ListTile(
+                leading: const Icon(Icons.upload_rounded, color: Color(0xFF00BFA6)),
+                title: const Text('Exporter l\'historique', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _exportHistory();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.download_rounded, color: Color(0xFF448AFF)),
+                title: const Text('Importer un fichier', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _importHistory();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_sweep_rounded, color: Colors.redAccent),
+                title: const Text('Effacer l\'historique', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _clearHistory();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<StudentAbsence> get _filteredStudents {
+    var list = _students.where((s) {
+      if (_searchQuery.isNotEmpty) {
+        return s.name.toLowerCase().contains(_searchQuery.toLowerCase());
+      }
+      return true;
+    }).where((s) {
+      if (_showOnlyAbsences) {
+        return s.hasAnyAbsence;
+      }
+      return true;
+    }).toList();
+    
+    list.sort((a, b) => a.number.compareTo(b.number));
+    return list;
   }
 
   @override
@@ -307,17 +525,39 @@ class _ScannerScreenState extends State<ScannerScreen>
           ],
         ),
         actions: [
+          if (hasResults) ...[
+            IconButton(
+              icon: const Icon(Icons.bar_chart_rounded),
+              tooltip: 'Statistiques',
+              onPressed: _showStatistics,
+            ),
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert_rounded),
+              onSelected: (value) {
+                switch (value) {
+                  case 'csv':
+                    _exportToCsv();
+                    break;
+                  case 'pdf':
+                    _exportToPdf();
+                    break;
+                  case 'share':
+                    _shareResults();
+                    break;
+                }
+              },
+              itemBuilder: (ctx) => [
+                const PopupMenuItem(value: 'csv', child: Text('Exporter CSV')),
+                const PopupMenuItem(value: 'pdf', child: Text('Exporter PDF')),
+                const PopupMenuItem(value: 'share', child: Text('Partager')),
+              ],
+            ),
+          ],
           IconButton(
             icon: const Icon(Icons.settings_rounded),
-            tooltip: 'Paramètres',
-            onPressed: _showSettings,
+            tooltip: 'Gestion données',
+            onPressed: _showDataManagement,
           ),
-          if (hasResults)
-            IconButton(
-              icon: const Icon(Icons.share_rounded),
-              tooltip: 'Partager',
-              onPressed: _shareResults,
-            ),
         ],
       ),
       body: SafeArea(
@@ -396,12 +636,12 @@ class _ScannerScreenState extends State<ScannerScreen>
               borderRadius: BorderRadius.circular(16),
               child: Image.file(
                 _selectedImage!,
-                height: 220,
+                height: 180,
                 width: double.infinity,
                 fit: BoxFit.cover,
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
           ],
 
           if (!hasResults) ...[
@@ -413,8 +653,10 @@ class _ScannerScreenState extends State<ScannerScreen>
           const SizedBox(height: 24),
 
           if (hasResults) ...[
-            _buildSettingsBar(),
+            _buildInfoBar(),
             const SizedBox(height: 16),
+            _buildSearchBar(),
+            const SizedBox(height: 12),
             _buildStudentsCard(),
             const SizedBox(height: 16),
             _buildRawTextCard(),
@@ -455,7 +697,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         ),
         const SizedBox(height: 10),
         const Text(
-          'Prenez une photo ou choisissez une image\npour détecter les élèves absents.',
+          'Prenez une photo ou Choose une image\npour détecter les élèves absents.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 15, color: Colors.white54, height: 1.5),
         ),
@@ -494,46 +736,78 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
   }
 
-  Widget _buildSettingsBar() {
+  Widget _buildInfoBar() {
+    final absentCount = _students.where((s) => s.hasAnyAbsence).length;
+    final totalMinutes = _students.fold(0, (sum, s) => sum + s.getTotalMinutes());
+    final totalHours = totalMinutes ~/ 60;
+    final totalMins = totalMinutes % 60;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF448AFF).withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Icon(Icons.timer_rounded, color: Color(0xFF448AFF), size: 20),
-            ),
-            const SizedBox(width: 12),
-            const Expanded(
-              child: Text(
-                'Durée par case',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: const Color(0xFF448AFF).withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '$_minutesPerSlot min',
-                style: const TextStyle(color: Color(0xFF448AFF), fontWeight: FontWeight.w700),
-              ),
-            ),
-            const SizedBox(width: 8),
-            GestureDetector(
-              onTap: _showSettings,
-              child: const Icon(Icons.edit_rounded, color: Colors.white38, size: 20),
-            ),
+            _buildInfoItem(Icons.people_rounded, '$absentCount', 'Absents'),
+            Container(width: 1, height: 40, color: Colors.white12),
+            _buildInfoItem(Icons.timer_rounded, '${totalHours}h ${totalMins}min', 'Total'),
+            Container(width: 1, height: 40, color: Colors.white12),
+            _buildInfoItem(Icons.access_time_rounded, '2h30', 'Par case'),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildInfoItem(IconData icon, String value, String label) {
+    return Column(
+      children: [
+        Icon(icon, color: const Color(0xFF00BFA6), size: 24),
+        const SizedBox(height: 4),
+        Text(value, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white)),
+        Text(label, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+      ],
+    );
+  }
+
+  Widget _buildSearchBar() {
+    return Row(
+      children: [
+        Expanded(
+          child: TextField(
+            onChanged: (value) => setState(() => _searchQuery = value),
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'Rechercher un élève...',
+              hintStyle: const TextStyle(color: Colors.white38),
+              prefixIcon: const Icon(Icons.search, color: Colors.white38),
+              filled: true,
+              fillColor: const Color(0xFF161B22),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        GestureDetector(
+          onTap: () => setState(() => _showOnlyAbsences = !_showOnlyAbsences),
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: _showOnlyAbsences ? const Color(0xFFFF5252) : const Color(0xFF161B22),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _showOnlyAbsences ? Colors.transparent : Colors.white12),
+            ),
+            child: Icon(
+              Icons.filter_list_rounded,
+              color: _showOnlyAbsences ? Colors.white : Colors.white54,
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -549,16 +823,16 @@ class _ScannerScreenState extends State<ScannerScreen>
                 Container(
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                    color: _students.any((s) => s.getTotalMinutes(_minutesPerSlot) > 0)
+                    color: _students.any((s) => s.hasAnyAbsence)
                         ? const Color(0xFFFF5252).withValues(alpha: 0.15)
                         : const Color(0xFF00E676).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Icon(
-                    _students.any((s) => s.getTotalMinutes(_minutesPerSlot) > 0)
+                    _students.any((s) => s.hasAnyAbsence)
                         ? Icons.person_off_rounded
                         : Icons.check_circle_outline_rounded,
-                    color: _students.any((s) => s.getTotalMinutes(_minutesPerSlot) > 0)
+                    color: _students.any((s) => s.hasAnyAbsence)
                         ? const Color(0xFFFF5252)
                         : const Color(0xFF00E676),
                     size: 20,
@@ -567,32 +841,36 @@ class _ScannerScreenState extends State<ScannerScreen>
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    _students.isNotEmpty && _students.any((s) => s.getTotalMinutes(_minutesPerSlot) > 0)
-                        ? 'Élèves absents (${_students.where((s) => s.getTotalMinutes(_minutesPerSlot) > 0).length})'
+                    _filteredStudents.isNotEmpty && _filteredStudents.any((s) => s.hasAnyAbsence)
+                        ? 'Élèves absents (${_filteredStudents.where((s) => s.hasAnyAbsence).length})'
                         : 'Aucune absence détectée',
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white),
                   ),
                 ),
               ],
             ),
-            if (_students.isNotEmpty) ...[
+            if (_filteredStudents.isNotEmpty) ...[
               const SizedBox(height: 16),
               const Divider(color: Colors.white12, height: 1),
               const SizedBox(height: 8),
               ListView.separated(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                itemCount: _students.length,
+                itemCount: _filteredStudents.length,
                 separatorBuilder: (context, index) => const Divider(color: Colors.white12, height: 1),
                 itemBuilder: (context, index) {
-                  return _StudentCard(
-                    student: _students[index],
-                    minutesPerSlot: _minutesPerSlot,
-                    onSlotToggle: (dayIndex, slotIndex, isMarked, markType) {
-                      _updateStudentMinutes(index, dayIndex, slotIndex, isMarked, markType);
-                    },
-                    onDayToggle: (dayIndex) {
-                      _toggleDayPresent(index, dayIndex);
+                  final student = _filteredStudents[index];
+                  return _StudentListItem(
+                    student: student,
+                    onTap: () => _showStudentDetail(student),
+                    onTogglePresence: () {
+                      setState(() {
+                        if (student.hasAnyAbsence) {
+                          student.markAllPresent();
+                        } else {
+                          student.markAllAbsent();
+                        }
+                      });
                     },
                   );
                 },
@@ -600,6 +878,28 @@ class _ScannerScreenState extends State<ScannerScreen>
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  void _showStudentDetail(StudentAbsence student) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _StudentDetailSheet(
+        student: student,
+        onSlotToggle: (dayIndex, slotIndex) {
+          student.toggleSlot(dayIndex, slotIndex);
+          setState(() {});
+        },
+        onDayToggle: (dayIndex) {
+          student.toggleDay(dayIndex);
+          setState(() {});
+        },
       ),
     );
   }
@@ -665,29 +965,43 @@ class _ScannerScreenState extends State<ScannerScreen>
         ),
         iconColor: Colors.white54,
         collapsedIconColor: Colors.white54,
-        children: _history.take(5).map((session) {
+        children: _history.take(5).toList().asMap().entries.map((entry) {
+          final index = entry.key;
+          final session = entry.value;
           final date = session.scanDate;
           final dateStr = '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
-          final absentCount = session.students.where((s) => s.getTotalMinutes(session.minutesPerSlot) > 0).length;
+          final absentCount = session.studentsWithAbsences;
+          final totalMinutes = session.getTotalAbsenceMinutes();
+          final totalHours = totalMinutes ~/ 60;
           
-          return ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: CircleAvatar(
-              radius: 14,
-              backgroundColor: const Color(0xFFFF5252).withValues(alpha: 0.15),
-              child: Text(
-                '$absentCount',
-                style: const TextStyle(color: Color(0xFFFF5252), fontSize: 11, fontWeight: FontWeight.w700),
+          return Dismissible(
+            key: ValueKey('history_$index'),
+            direction: DismissDirection.endToStart,
+            background: Container(
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.only(right: 16),
+              child: const Icon(Icons.delete_outline, color: Color(0xFFFF5252)),
+            ),
+            onDismissed: (_) => _deleteHistoryItem(index),
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: CircleAvatar(
+                radius: 14,
+                backgroundColor: const Color(0xFFFF5252).withValues(alpha: 0.15),
+                child: Text(
+                  '$absentCount',
+                  style: const TextStyle(color: Color(0xFFFF5252), fontSize: 11, fontWeight: FontWeight.w700),
+                ),
               ),
+              title: Text(
+                session.students.where((s) => s.hasAnyAbsence).map((s) => s.name).join(', '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              subtitle: Text('$dateStr | ${totalHours}h', style: const TextStyle(color: Colors.white38, fontSize: 11)),
             ),
-            title: Text(
-              session.students.where((s) => s.getTotalMinutes(session.minutesPerSlot) > 0).map((s) => s.name).join(', '),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
-            ),
-            subtitle: Text('$dateStr | ${session.minutesPerSlot}min/case', style: const TextStyle(color: Colors.white38, fontSize: 11)),
           );
         }).toList(),
       ),
@@ -695,234 +1009,604 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 }
 
-class _StudentCard extends StatefulWidget {
+class _StudentListItem extends StatelessWidget {
   final StudentAbsence student;
-  final int minutesPerSlot;
-  final Function(int dayIndex, int slotIndex, bool isMarked, String markType) onSlotToggle;
+  final VoidCallback onTap;
+  final VoidCallback onTogglePresence;
+
+  const _StudentListItem({
+    required this.student,
+    required this.onTap,
+    required this.onTogglePresence,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasAbsence = student.hasAnyAbsence;
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: GestureDetector(
+        onTap: onTogglePresence,
+        child: Container(
+          width: 32, height: 32,
+          decoration: BoxDecoration(
+            color: hasAbsence ? const Color(0xFFFF5252).withValues(alpha: 0.2) : const Color(0xFF00E676).withValues(alpha: 0.2),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            hasAbsence ? Icons.close_rounded : Icons.check_rounded,
+            color: hasAbsence ? const Color(0xFFFF5252) : const Color(0xFF00E676),
+            size: 18,
+          ),
+        ),
+      ),
+      title: Text(
+        '${student.number}. ${student.name}',
+        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 15),
+      ),
+      subtitle: hasAbsence
+          ? Text(
+              student.formatTotalDuration(),
+              style: const TextStyle(color: Color(0xFFFF5252), fontSize: 12),
+            )
+          : null,
+      trailing: hasAbsence
+          ? Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF5252).withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                student.formatTotalDuration(),
+                style: const TextStyle(
+                  color: Color(0xFFFF5252),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            )
+          : null,
+      onTap: onTap,
+    );
+  }
+}
+
+class _StudentDetailSheet extends StatelessWidget {
+  final StudentAbsence student;
+  final Function(int dayIndex, int slotIndex) onSlotToggle;
   final Function(int dayIndex) onDayToggle;
 
-  const _StudentCard({
+  const _StudentDetailSheet({
     required this.student,
-    required this.minutesPerSlot,
     required this.onSlotToggle,
     required this.onDayToggle,
   });
 
   @override
-  State<_StudentCard> createState() => _StudentCardState();
-}
-
-class _StudentCardState extends State<_StudentCard> {
-  bool _expanded = false;
-
-  @override
   Widget build(BuildContext context) {
-    final totalMinutes = widget.student.getTotalMinutes(widget.minutesPerSlot);
-    final hasAbsence = totalMinutes > 0;
-
-    return Column(
-      children: [
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: CircleAvatar(
-            radius: 18,
-            backgroundColor: hasAbsence
-                ? const Color(0xFFFF5252).withValues(alpha: 0.15)
-                : const Color(0xFF00E676).withValues(alpha: 0.15),
-            child: Text(
-              '${widget.student.number}',
-              style: TextStyle(
-                color: hasAbsence ? const Color(0xFFFF5252) : const Color(0xFF00E676),
-                fontWeight: FontWeight.w700,
-                fontSize: 13,
+    return DraggableScrollableSheet(
+      initialChildSize: 0.7,
+      minChildSize: 0.5,
+      maxChildSize: 0.9,
+      expand: false,
+      builder: (context, scrollController) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
             ),
-          ),
-          title: Text(
-            widget.student.name,
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 15),
-          ),
-          subtitle: hasAbsence
-              ? Text(
-                  widget.student.formatTotalDuration(widget.minutesPerSlot),
-                  style: const TextStyle(color: Color(0xFFFF5252), fontSize: 12),
-                )
-              : null,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (hasAbsence)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFF5252).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: const Color(0xFFFF5252).withValues(alpha: 0.15),
                   child: Text(
-                    widget.student.formatTotalDuration(widget.minutesPerSlot),
-                    style: const TextStyle(
-                      color: Color(0xFFFF5252),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
+                    '${student.number}',
+                    style: const TextStyle(color: Color(0xFFFF5252), fontWeight: FontWeight.w700),
                   ),
                 ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () => setState(() => _expanded = !_expanded),
-                child: Icon(
-                  _expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
-                  color: Colors.white54,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(student.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white)),
+                      Text(student.formatTotalDuration(), style: const TextStyle(color: Color(0xFFFF5252), fontSize: 14)),
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
-          onTap: () => setState(() => _expanded = !_expanded),
-        ),
-        if (_expanded) ...[
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsets.only(left: 40),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: List.generate(6, (dayIndex) {
-                final day = widget.student.week[dayIndex];
-                final dayMinutes = day.getTotalMinutes(widget.minutesPerSlot);
-                final isAbsent = dayMinutes > 0;
+              ],
+            ),
+            const SizedBox(height: 20),
+            Expanded(
+              child: ListView.builder(
+                controller: scrollController,
+                itemCount: 6,
+                itemBuilder: (context, dayIndex) {
+                  final day = student.week[dayIndex];
+                  final dayMinutes = day.getTotalMinutes();
+                  final isAbsent = dayMinutes > 0;
 
-                return GestureDetector(
-                  onTap: () => widget.onDayToggle(dayIndex),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: isAbsent
-                          ? const Color(0xFFFF5252).withValues(alpha: 0.15)
-                          : Colors.white.withValues(alpha: 0.05),
-                      borderRadius: BorderRadius.circular(8),
+                      color: isAbsent ? const Color(0xFFFF5252).withValues(alpha: 0.1) : Colors.white.withValues(alpha: 0.03),
+                      borderRadius: BorderRadius.circular(12),
                       border: Border.all(
                         color: isAbsent ? const Color(0xFFFF5252).withValues(alpha: 0.3) : Colors.white12,
                       ),
                     ),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          day.dayName,
-                          style: TextStyle(
-                            color: isAbsent ? const Color(0xFFFF5252) : Colors.white54,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
+                        GestureDetector(
+                          onTap: () => onDayToggle(dayIndex),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                day.dayName,
+                                style: TextStyle(
+                                  color: isAbsent ? const Color(0xFFFF5252) : Colors.white54,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              Text(
+                                isAbsent ? '${dayMinutes ~/ 60}h ${dayMinutes % 60}min' : 'Present',
+                                style: TextStyle(
+                                  color: isAbsent ? const Color(0xFFFF5252) : Colors.white38,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: List.generate(4, (slotIndex) {
+                            final slot = day.slots[slotIndex];
+                            return Expanded(
+                              child: GestureDetector(
+                                onTap: () => onSlotToggle(dayIndex, slotIndex),
+                                child: Container(
+                                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                                  padding: const EdgeInsets.symmetric(vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: slot.isMarked
+                                        ? const Color(0xFFFF5252).withValues(alpha: 0.3)
+                                        : Colors.white.withValues(alpha: 0.05),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(
+                                      color: slot.isMarked
+                                          ? const Color(0xFFFF5252)
+                                          : Colors.white12,
+                                    ),
+                                  ),
+                                  child: Center(
+                                    child: Text(
+                                      slot.isMarked ? (slot.markType.isEmpty ? 'X' : slot.markType) : '-',
+                                      style: TextStyle(
+                                        color: slot.isMarked ? const Color(0xFFFF5252) : Colors.white38,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatisticsSheet extends StatelessWidget {
+  final List<StudentAbsence> students;
+  final List<WeeklyScanSession> history;
+
+  const _StatisticsSheet({required this.students, required this.history});
+
+  @override
+  Widget build(BuildContext context) {
+    final absentStudents = students.where((s) => s.hasAnyAbsence).toList();
+    final totalMinutes = students.fold(0, (sum, s) => sum + s.getTotalMinutes());
+    final totalHours = totalMinutes ~/ 60;
+    final totalMins = totalMinutes % 60;
+    
+    final sortedByAbsence = List<StudentAbsence>.from(absentStudents)
+      ..sort((a, b) => b.getTotalMinutes().compareTo(a.getTotalMinutes()));
+
+    final Map<String, int> dayStats = {};
+    for (final dayName in ['LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM']) {
+      dayStats[dayName] = 0;
+    }
+    for (final student in students) {
+      for (final day in student.week) {
+        dayStats[day.dayName] = (dayStats[day.dayName] ?? 0) + day.markedCount;
+      }
+    }
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text('Statistiques', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white)),
+            const SizedBox(height: 20),
+            
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildStatCard('${absentStudents.length}', 'Absents', const Color(0xFFFF5252)),
+                _buildStatCard('${totalHours}h ${totalMins}min', 'Total', const Color(0xFF00BFA6)),
+                _buildStatCard('${students.length}', 'Total eleves', const Color(0xFF448AFF)),
+              ],
+            ),
+            
+            const SizedBox(height: 24),
+            const Text('Absences par jour', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: dayStats.entries.map((e) => _buildDayStat(e.key, e.value)).toList(),
+            ),
+            
+            const SizedBox(height: 24),
+            if (sortedByAbsence.isNotEmpty) ...[
+              const Text('Top absents', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+              const SizedBox(height: 12),
+              ...sortedByAbsence.take(5).map((s) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('${s.number}. ${s.name}', style: const TextStyle(color: Colors.white70)),
+                    Text(s.formatTotalDuration(), style: const TextStyle(color: Color(0xFFFF5252), fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              )),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatCard(String value, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: color)),
+          Text(label, style: const TextStyle(fontSize: 12, color: Colors.white54)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDayStat(String day, int count) {
+    return Column(
+      children: [
+        Container(
+          width: 40, height: 40,
+          decoration: BoxDecoration(
+            color: count > 0 ? const Color(0xFFFF5252).withValues(alpha: 0.2) : Colors.white.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: Text('$count', style: TextStyle(color: count > 0 ? const Color(0xFFFF5252) : Colors.white38, fontWeight: FontWeight.w600)),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(day, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+      ],
+    );
+  }
+}
+
+class VerificationScreen extends StatefulWidget {
+  final List<StudentAbsence> students;
+  final File? image;
+  final String rawText;
+  final Function(List<StudentAbsence>) onSave;
+  final VoidCallback onCancel;
+
+  const VerificationScreen({
+    super.key,
+    required this.students,
+    this.image,
+    required this.rawText,
+    required this.onSave,
+    required this.onCancel,
+  });
+
+  @override
+  State<VerificationScreen> createState() => _VerificationScreenState();
+}
+
+class _VerificationScreenState extends State<VerificationScreen> {
+  late List<StudentAbsence> _students;
+
+  @override
+  void initState() {
+    super.initState();
+    _students = widget.students;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final absentCount = _students.where((s) => s.hasAnyAbsence).length;
+    final totalMinutes = _students.fold(0, (sum, s) => sum + s.getTotalMinutes());
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Vérification'),
+        leading: IconButton(
+          icon: const Icon(Icons.close_rounded),
+          onPressed: widget.onCancel,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              for (var student in _students) {
+                student.markAllPresent();
+              }
+              setState(() {});
+            },
+            child: const Text('Tout present', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () {
+              for (var student in _students) {
+                student.markAllAbsent();
+              }
+              setState(() {});
+            },
+            child: const Text('Tout absent', style: TextStyle(color: Color(0xFFFF5252))),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          if (widget.image != null)
+            Container(
+              height: 150,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                image: DecorationImage(
+                  image: FileImage(widget.image!),
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ),
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: const Color(0xFF161B22),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildStat('$absentCount', 'Absents', const Color(0xFFFF5252)),
+                _buildStat('${totalMinutes ~/ 60}h ${totalMinutes % 60}min', 'Total', const Color(0xFF00BFA6)),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: _students.length,
+              itemBuilder: (context, index) {
+                final student = _students[index];
+                return _VerificationStudentCard(
+                  student: student,
+                  onToggleSlot: (dayIndex, slotIndex) {
+                    student.toggleSlot(dayIndex, slotIndex);
+                    setState(() {});
+                  },
+                  onDayToggle: (dayIndex) {
+                    student.toggleDay(dayIndex);
+                    setState(() {});
+                  },
+                  onTogglePresence: () {
+                    if (student.hasAnyAbsence) {
+                      student.markAllPresent();
+                    } else {
+                      student.markAllAbsent();
+                    }
+                    setState(() {});
+                  },
+                );
+              },
+            ),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: widget.onCancel,
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        side: const BorderSide(color: Colors.white24),
+                      ),
+                      child: const Text('Annuler', style: TextStyle(color: Colors.white70)),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => widget.onSave(_students),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF00BFA6),
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                      child: const Text('Confirmer', style: TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStat(String value, String label, Color color) {
+    return Column(
+      children: [
+        Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: color)),
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.white54)),
+      ],
+    );
+  }
+}
+
+class _VerificationStudentCard extends StatelessWidget {
+  final StudentAbsence student;
+  final Function(int dayIndex, int slotIndex) onToggleSlot;
+  final Function(int dayIndex) onDayToggle;
+  final VoidCallback onTogglePresence;
+
+  const _VerificationStudentCard({
+    required this.student,
+    required this.onToggleSlot,
+    required this.onDayToggle,
+    required this.onTogglePresence,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                GestureDetector(
+                  onTap: onTogglePresence,
+                  child: Container(
+                    width: 36, height: 36,
+                    decoration: BoxDecoration(
+                      color: student.hasAnyAbsence ? const Color(0xFFFF5252) : const Color(0xFF00E676),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Center(
+                      child: Text(
+                        '${student.number}',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(student.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+                      Text(student.formatTotalDuration(), style: const TextStyle(fontSize: 14, color: Color(0xFFFF5252))),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: List.generate(6, (dayIndex) {
+                final day = student.week[dayIndex];
+                final isAbsent = day.hasAbsence;
+
+                return GestureDetector(
+                  onTap: () => onDayToggle(dayIndex),
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: isAbsent ? const Color(0xFFFF5252).withValues(alpha: 0.15) : Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: isAbsent ? const Color(0xFFFF5252).withValues(alpha: 0.3) : Colors.white12),
+                    ),
+                    child: Column(
+                      children: [
+                        Text(day.dayName, style: TextStyle(color: isAbsent ? const Color(0xFFFF5252) : Colors.white54, fontSize: 12, fontWeight: FontWeight.w600)),
                         const SizedBox(height: 4),
-                        Text(
-                          day.getDisplayMarks(),
-                          style: TextStyle(
-                            color: isAbsent ? const Color(0xFFFF5252) : Colors.white38,
-                            fontSize: 12,
-                            fontFamily: 'monospace',
-                          ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: List.generate(4, (slotIndex) {
+                            final slot = day.slots[slotIndex];
+                            return GestureDetector(
+                              onTap: () => onToggleSlot(dayIndex, slotIndex),
+                              child: Container(
+                                width: 20, height: 20,
+                                margin: const EdgeInsets.symmetric(horizontal: 1),
+                                decoration: BoxDecoration(
+                                  color: slot.isMarked ? const Color(0xFFFF5252) : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: slot.isMarked ? const Color(0xFFFF5252) : Colors.white24),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    slot.isMarked ? (slot.markType.isEmpty ? 'X' : slot.markType) : '-',
+                                    style: TextStyle(fontSize: 10, color: slot.isMarked ? Colors.white : Colors.white38),
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
                         ),
-                        if (isAbsent) ...[
-                          const SizedBox(height: 2),
-                          Text(
-                            '${dayMinutes ~/ 60}h ${dayMinutes % 60}min',
-                            style: const TextStyle(
-                              color: Color(0xFFFF5252),
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
                       ],
                     ),
                   ),
                 );
               }),
             ),
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-class _SettingsDialog extends StatefulWidget {
-  final int initialMinutes;
-
-  const _SettingsDialog({required this.initialMinutes});
-
-  @override
-  State<_SettingsDialog> createState() => _SettingsDialogState();
-}
-
-class _SettingsDialogState extends State<_SettingsDialog> {
-  late int _selectedMinutes;
-
-  @override
-  void initState() {
-    super.initState();
-    _selectedMinutes = widget.initialMinutes;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      backgroundColor: const Color(0xFF161B22),
-      title: const Text('Paramètres', style: TextStyle(color: Colors.white)),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Durée par case cochée',
-            style: TextStyle(color: Colors.white70, fontSize: 14),
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [15, 20, 30, 45, 60].map((mins) {
-              final isSelected = _selectedMinutes == mins;
-              return GestureDetector(
-                onTap: () => setState(() => _selectedMinutes = mins),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: isSelected ? const Color(0xFF00BFA6).withValues(alpha: 0.2) : Colors.white.withValues(alpha: 0.05),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: isSelected ? const Color(0xFF00BFA6) : Colors.white12,
-                    ),
-                  ),
-                  child: Text(
-                    '$mins min',
-                    style: TextStyle(
-                      color: isSelected ? const Color(0xFF00BFA6) : Colors.white70,
-                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            '示例: 4 cases = ${_selectedMinutes * 4} min (${_selectedMinutes * 4 ~/ 60}h ${_selectedMinutes * 4 % 60}min)',
-            style: const TextStyle(color: Colors.white38, fontSize: 12),
-          ),
-        ],
+          ],
+        ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Annuler', style: TextStyle(color: Colors.white54)),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, _selectedMinutes),
-          child: const Text('Enregistrer', style: TextStyle(color: Color(0xFF00BFA6))),
-        ),
-      ],
     );
   }
 }

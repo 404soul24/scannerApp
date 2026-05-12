@@ -24,6 +24,8 @@ class AbsenceSlot {
 }
 
 class DailyAbsence {
+  static const int minutesPerSlot = 150; // 2.5 hours per checkbox
+
   String dayName;
   List<AbsenceSlot> slots;
 
@@ -32,32 +34,43 @@ class DailyAbsence {
     List<AbsenceSlot>? slots,
   }) : slots = slots ?? List.generate(4, (_) => AbsenceSlot());
 
-  int getTotalMinutes(int minutesPerSlot) {
+  int getTotalMinutes() {
     int total = 0;
-    bool isFullDay = false;
-
     for (var slot in slots) {
-      if (slot.markType == 'A') {
-        isFullDay = true;
-        break;
-      }
-    }
-
-    if (isFullDay) {
-      return 4 * minutesPerSlot;
-    }
-
-    for (var slot in slots) {
-      if (slot.isMarked && (slot.markType == 'X' || slot.markType == '/')) {
+      if (slot.isMarked && (slot.markType == 'X' || slot.markType == '/' || slot.markType == 'A')) {
         total += minutesPerSlot;
       }
     }
-
     return total;
   }
 
   String getDisplayMarks() {
     return slots.map((s) => s.markType.isEmpty ? '-' : s.markType).join();
+  }
+
+  int get markedCount => slots.where((s) => s.isMarked).length;
+  bool get hasAbsence => markedCount > 0;
+
+  void markAllPresent() {
+    for (int i = 0; i < slots.length; i++) {
+      slots[i] = AbsenceSlot(isMarked: false, markType: '');
+    }
+  }
+
+  void markAllAbsent() {
+    for (int i = 0; i < slots.length; i++) {
+      slots[i] = AbsenceSlot(isMarked: true, markType: 'X');
+    }
+  }
+
+  void toggleSlot(int slotIndex) {
+    if (slotIndex >= 0 && slotIndex < slots.length) {
+      final current = slots[slotIndex];
+      slots[slotIndex] = AbsenceSlot(
+        isMarked: !current.isMarked,
+        markType: !current.isMarked ? 'X' : '',
+      );
+    }
   }
 
   Map<String, dynamic> toJson() => {
@@ -84,6 +97,8 @@ class DailyAbsence {
 }
 
 class StudentAbsence {
+  static const int minutesPerSlot = 150;
+
   int number;
   String name;
   List<DailyAbsence> week;
@@ -102,17 +117,56 @@ class StudentAbsence {
               DailyAbsence(dayName: 'SAM'),
             ];
 
-  int getTotalMinutes(int minutesPerSlot) {
-    return week.fold(0, (sum, day) => sum + day.getTotalMinutes(minutesPerSlot));
+  int getTotalMinutes() {
+    return week.fold(0, (sum, day) => sum + day.getTotalMinutes());
   }
 
-  String formatTotalDuration(int minutesPerSlot) {
-    final total = getTotalMinutes(minutesPerSlot);
+  String formatTotalDuration() {
+    final total = getTotalMinutes();
     final hours = total ~/ 60;
     final mins = total % 60;
     if (hours == 0) return '${mins}min';
     if (mins == 0) return '${hours}h';
     return '${hours}h ${mins}min';
+  }
+
+  bool get hasAnyAbsence => week.any((d) => d.hasAbsence);
+
+  int get totalMarkedSlots {
+    int count = 0;
+    for (var day in week) {
+      count += day.markedCount;
+    }
+    return count;
+  }
+
+  void markAllPresent() {
+    for (var day in week) {
+      day.markAllPresent();
+    }
+  }
+
+  void markAllAbsent() {
+    for (var day in week) {
+      day.markAllAbsent();
+    }
+  }
+
+  void toggleSlot(int dayIndex, int slotIndex) {
+    if (dayIndex >= 0 && dayIndex < 6 && slotIndex >= 0 && slotIndex < 4) {
+      week[dayIndex].toggleSlot(slotIndex);
+    }
+  }
+
+  void toggleDay(int dayIndex) {
+    if (dayIndex >= 0 && dayIndex < 6) {
+      final day = week[dayIndex];
+      if (day.hasAbsence) {
+        day.markAllPresent();
+      } else {
+        day.markAllAbsent();
+      }
+    }
   }
 
   Map<String, dynamic> toJson() => {
@@ -151,27 +205,28 @@ class StudentAbsence {
 }
 
 class WeeklyScanSession {
+  static const int minutesPerSlot = 150;
+
   DateTime scanDate;
   List<StudentAbsence> students;
-  int minutesPerSlot;
   String rawText;
 
   WeeklyScanSession({
     DateTime? scanDate,
     List<StudentAbsence>? students,
-    this.minutesPerSlot = 30,
     this.rawText = '',
   })  : scanDate = scanDate ?? DateTime.now(),
         students = students ?? List.generate(15, (_) => StudentAbsence());
 
   int getTotalAbsenceMinutes() {
-    return students.fold(0, (sum, s) => sum + s.getTotalMinutes(minutesPerSlot));
+    return students.fold(0, (sum, s) => sum + s.getTotalMinutes());
   }
+
+  int get studentsWithAbsences => students.where((s) => s.hasAnyAbsence).length;
 
   Map<String, dynamic> toJson() => {
         'scanDate': scanDate.toIso8601String(),
         'students': students.map((s) => s.toJson()).toList(),
-        'minutesPerSlot': minutesPerSlot,
         'rawText': rawText,
       };
 
@@ -184,7 +239,6 @@ class WeeklyScanSession {
                 ?.map((s) => StudentAbsence.fromJson(s))
                 .toList() ??
             List.generate(15, (_) => StudentAbsence()),
-        minutesPerSlot: json['minutesPerSlot'] ?? 30,
         rawText: json['rawText'] ?? '',
       );
 }
