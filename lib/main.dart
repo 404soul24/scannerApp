@@ -1381,7 +1381,10 @@ class _VerificationScreenState extends State<VerificationScreen> {
         title: const Text('Vérification'),
         leading: IconButton(
           icon: const Icon(Icons.close_rounded),
-          onPressed: widget.onCancel,
+          onPressed: () {
+            Navigator.pop(context);
+            widget.onCancel();
+          },
         ),
         actions: [
           TextButton(
@@ -1463,7 +1466,10 @@ class _VerificationScreenState extends State<VerificationScreen> {
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: widget.onCancel,
+                      onPressed: () {
+                        Navigator.pop(context);
+                        widget.onCancel();
+                      },
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         side: const BorderSide(color: Colors.white24),
@@ -1474,7 +1480,10 @@ class _VerificationScreenState extends State<VerificationScreen> {
                   const SizedBox(width: 16),
                   Expanded(
                     child: ElevatedButton(
-                      onPressed: () => widget.onSave(_students),
+                      onPressed: () {
+                        widget.onSave(_students);
+                        Navigator.pop(context);
+                      },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF00BFA6),
                         padding: const EdgeInsets.symmetric(vertical: 16),

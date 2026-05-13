@@ -380,159 +380,61 @@ class OCRService {
       }
     }
 
-    for (int i = 0; i < 15; i++) {
+    // First pass: find all student numbers to determine actual count
+    Set<int> foundNumbers = {};
+    for (final row in rows) {
+      for (final line in row) {
+        final text = line.text.trim();
+        // Look for numbers at start of lines (student N°)
+        final numMatches = RegExp(r'^(\d+)').allMatches(text);
+        for (final match in numMatches) {
+          final num = int.tryParse(match.group(1) ?? '');
+          if (num != null && num >= 1 && num <= 50) { // Allow up to 50 students
+            foundNumbers.add(num);
+          }
+        }
+      }
+    }
+
+    // Determine actual student count
+    int studentCount = 15;
+    if (foundNumbers.isNotEmpty) {
+      final maxNum = foundNumbers.reduce((a, b) => a > b ? a : b);
+      studentCount = maxNum > 15 ? maxNum : 15;
+    }
+
+    // Create students based on detected count
+    for (int i = 0; i < studentCount; i++) {
       students.add(StudentAbsence(number: i + 1, name: ''));
     }
 
+    // Second pass: extract names
     for (final row in rows) {
-      String? studentName;
-      List<String> rowMarks = [];
-      
       for (final line in row) {
         final text = line.text.trim();
-        final cleanText = text.replaceAll(RegExp(r'[^\w\s]'), '').trim();
         
-        final numMatch = RegExp(r'^(\d+)').firstMatch(text);
-        if (numMatch != null && rowMarks.isEmpty) {
+        // Look for student number and name pattern: "1 Name" or "1. Name"
+        final numMatch = RegExp(r'^(\d+)[\s.\)]+(.+)$').firstMatch(text);
+        if (numMatch != null) {
           final number = int.tryParse(numMatch.group(1) ?? '');
-          if (number != null && number >= 1 && number <= 15) {
-            final namePart = text.substring(numMatch.end).trim();
-            if (namePart.length > 2) {
-              studentName = namePart.replaceAll(RegExp(r'\s+'), ' ').trim();
+          final namePart = numMatch.group(2)?.trim() ?? '';
+          
+          if (number != null && number >= 1 && number <= studentCount && namePart.length > 1) {
+            // Filter out day headers and common words
+            if (!dayPatterns.keys.any((d) => namePart.toLowerCase().contains(d))) {
+              final studentName = namePart.replaceAll(RegExp(r'\s+'), ' ').trim();
+              students[number - 1] = students[number - 1].copyWith(name: studentName);
+              break;
             }
-          }
-        }
-        
-        for (final mark in markPatterns) {
-          if (text.toUpperCase().contains(mark)) {
-            final regex = RegExp(r'[Xxa/\\]', caseSensitive: false);
-            final matches = regex.allMatches(text);
-            for (final m in matches) {
-              final before = text.substring(0, m.start).trim();
-              final after = text.substring(m.end).trim();
-              if (before.isNotEmpty && studentName == null) {
-                final potentialName = before.replaceAll(RegExp(r'^[\d\s]+'), '').trim();
-                if (potentialName.length > 2 && !dayPatterns.keys.any((d) => potentialName.toLowerCase().contains(d))) {
-                  studentName = potentialName;
-                }
-              }
-            }
-            
-            String marks = '';
-            for (final m in regex.allMatches(text)) {
-              marks += text[m.start].toUpperCase();
-            }
-            if (marks.isNotEmpty) {
-              rowMarks.add(marks);
-            }
-          }
-        }
-      }
-
-      if (studentName != null && studentName.isNotEmpty) {
-        final numberMatch = RegExp(r'^(\d+)').firstMatch(studentName);
-        int? studentNum;
-        if (numberMatch != null) {
-          studentNum = int.tryParse(numberMatch.group(1) ?? '');
-          if (studentNum != null && studentNum >= 1 && studentNum <= 15) {
-            students[studentNum - 1] = students[studentNum - 1].copyWith(name: studentName.substring(numberMatch.end).trim());
           }
         }
       }
     }
 
+    // Fill empty names with placeholder
     for (int si = 0; si < students.length; si++) {
       if (students[si].name.isEmpty) {
         students[si] = students[si].copyWith(name: 'Élève ${si + 1}');
-      }
-    }
-
-    int currentSlotCount = 0;
-    for (final row in rows) {
-      for (final line in row) {
-        final text = line.text;
-        String marks = '';
-        for (final c in text.toUpperCase().split('')) {
-          if (markPatterns.contains(c)) {
-            marks += c;
-          }
-        }
-        
-        if (marks.isNotEmpty) {
-          currentSlotCount += marks.length;
-          
-          int estimatedStudent = (currentSlotCount / 24).floor();
-          if (estimatedStudent < 15) {
-            int startSlot = currentSlotCount % 24;
-            if (startSlot == 0) startSlot = 24;
-            
-            for (int m = 0; m < marks.length && (startSlot + m) <= 24; m++) {
-              int slotIndex = ((startSlot + m) - 1) % 4;
-              int dayIndex = ((startSlot + m) - 1) ~/ 4;
-              
-              if (dayIndex >= 0 && dayIndex < 6 && slotIndex >= 0 && slotIndex < 4) {
-                final mark = marks[m];
-                final day = students[estimatedStudent].week[dayIndex];
-                final newSlots = List<AbsenceSlot>.from(day.slots);
-                newSlots[slotIndex] = AbsenceSlot(
-                  isMarked: true,
-                  markType: mark,
-                );
-                students[estimatedStudent] = students[estimatedStudent].copyWith(
-                  week: List.generate(6, (di) => di == dayIndex 
-                    ? day.copyWith(slots: newSlots)
-                    : students[estimatedStudent].week[di]),
-                );
-              }
-            }
-          }
-        }
-      }
-    }
-
-    for (final row in rows) {
-      for (final line in row) {
-        final text = line.text.trim();
-        final markRegex = RegExp(r'([Xxa/\\])', caseSensitive: false);
-        final matches = markRegex.allMatches(text).toList();
-        
-        if (matches.length >= 4) {
-          String fullRowMarks = '';
-          for (final m in matches) {
-            fullRowMarks += text[m.start].toUpperCase();
-          }
-          
-          if (fullRowMarks.contains('A')) {
-            for (int studentIdx = 0; studentIdx < 15; studentIdx++) {
-              bool hasMultipleMarks = false;
-              for (final day in students[studentIdx].week) {
-                int markCount = day.slots.where((s) => s.isMarked).length;
-                if (markCount > 1) {
-                  hasMultipleMarks = true;
-                  break;
-                }
-              }
-              
-              if (!hasMultipleMarks) {
-                for (int dayIdx = 0; dayIdx < 6; dayIdx++) {
-                  final day = students[studentIdx].week[dayIdx];
-                  bool hasAnyMark = day.slots.any((s) => s.isMarked);
-                  if (!hasAnyMark) {
-                    final newSlots = List<AbsenceSlot>.generate(4, (i) => 
-                      AbsenceSlot(isMarked: true, markType: 'A'));
-                    students[studentIdx] = students[studentIdx].copyWith(
-                      week: List.generate(6, (di) => di == dayIdx 
-                        ? day.copyWith(slots: newSlots)
-                        : students[studentIdx].week[di]),
-                    );
-                    break;
-                  }
-                }
-                break;
-              }
-            }
-          }
-        }
       }
     }
 
