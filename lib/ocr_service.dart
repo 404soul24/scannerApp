@@ -342,21 +342,6 @@ class OCRService {
     final sortedLines = List<TextLine>.from(allLines)
       ..sort((a, b) => a.boundingBox.center.dy.compareTo(b.boundingBox.center.dy));
 
-    List<TextLine> nameLines = [];
-    List<TextLine> markLines = [];
-
-    for (final line in sortedLines) {
-      final text = line.text.trim().toLowerCase();
-      final hasDayHeader = dayPatterns.keys.any((d) => text.contains(d));
-      final hasNumber = RegExp(r'^\d+').hasMatch(line.text.trim());
-      
-      if (hasNumber && !hasDayHeader) {
-        nameLines.add(line);
-      } else if (!hasDayHeader && line.text.contains(RegExp(r'[Xxa/\\✕✗✘×χ⃠]'))) {
-        markLines.add(line);
-      }
-    }
-
     final heights = allLines.map((l) => l.boundingBox.height).toList()..sort();
     final medianHeight = heights.isNotEmpty ? heights[heights.length ~/ 2] : 20;
     final rowTolerance = medianHeight * 0.8;

@@ -154,15 +154,21 @@ class _ScannerScreenState extends State<ScannerScreen>
         final count = await _storageService.importHistoryFromJson(result.files.single.path!);
         _loadHistory();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('$count éléments importés')),
-          );
+          if (count > 0) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('$count éléments importés'), backgroundColor: const Color(0xFF00BFA6)),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Fichier invalide ou corrompu'), backgroundColor: Colors.redAccent),
+            );
+          }
         }
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Import échoué: $e')),
+          SnackBar(content: Text('Import échoué: $e'), backgroundColor: Colors.redAccent),
         );
       }
     }
@@ -986,6 +992,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             child: ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
+              onTap: () => _showHistoryDetails(session),
               leading: CircleAvatar(
                 radius: 14,
                 backgroundColor: const Color(0xFFFF5252).withValues(alpha: 0.15),
@@ -1004,6 +1011,150 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
           );
         }).toList(),
+      ),
+    );
+  }
+
+  void _showHistoryDetails(WeeklyScanSession session) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.8,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40, height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      const Icon(Icons.history_rounded, color: Color(0xFF00BFA6)),
+                      const SizedBox(width: 12),
+                      Text(
+                        'Détails du scan',
+                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${session.scanDate.day}/${session.scanDate.month}/${session.scanDate.year} à ${session.scanDate.hour.toString().padLeft(2, '0')}:${session.scanDate.minute.toString().padLeft(2, '0')}',
+                    style: const TextStyle(color: Colors.white54, fontSize: 14),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      _buildStatChip('${session.studentsWithAbsences} absents', const Color(0xFFFF5252)),
+                      const SizedBox(width: 8),
+                      _buildStatChip('${session.getTotalAbsenceMinutes() ~/ 60}h ${session.getTotalAbsenceMinutes() % 60}min total', const Color(0xFF00BFA6)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                controller: scrollController,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                itemCount: session.students.where((s) => s.hasAnyAbsence).length,
+                itemBuilder: (context, index) {
+                  final student = session.students.where((s) => s.hasAnyAbsence).toList()[index];
+                  return _buildHistoryStudentCard(student);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatChip(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(text, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+    );
+  }
+
+  Widget _buildHistoryStudentCard(StudentAbsence student) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 16,
+                  backgroundColor: const Color(0xFFFF5252).withValues(alpha: 0.15),
+                  child: Text('${student.number}', style: const TextStyle(color: Color(0xFFFF5252), fontWeight: FontWeight.w700, fontSize: 12)),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(student.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFF5252).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(student.formatTotalDuration(), style: const TextStyle(color: Color(0xFFFF5252), fontWeight: FontWeight.w700, fontSize: 12)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: student.week.where((d) => d.hasAbsence).map((day) {
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFF5252).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: const Color(0xFFFF5252).withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(day.dayName, style: const TextStyle(color: Color(0xFFFF5252), fontSize: 12, fontWeight: FontWeight.w600)),
+                      const SizedBox(width: 4),
+                      Text('(${day.getDisplayMarks()})', style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                      const SizedBox(width: 4),
+                      Text('${day.getTotalMinutes() ~/ 60}h${day.getTotalMinutes() % 60}', style: const TextStyle(color: Color(0xFFFF5252), fontSize: 11)),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1368,7 +1519,18 @@ class _VerificationScreenState extends State<VerificationScreen> {
   @override
   void initState() {
     super.initState();
-    _students = widget.students;
+    // Create deep copy to avoid mutating original list
+    _students = widget.students.map((s) => StudentAbsence(
+      number: s.number,
+      name: s.name,
+      week: s.week.map((d) => DailyAbsence(
+        dayName: d.dayName,
+        slots: d.slots.map((slot) => AbsenceSlot(
+          isMarked: slot.isMarked,
+          markType: slot.markType,
+        )).toList(),
+      )).toList(),
+    )).toList();
   }
 
   @override
