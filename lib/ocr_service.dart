@@ -26,6 +26,14 @@ class OCRService {
 
   Future<ScanResult> analyzeSheet(File imageFile) async {
     final imageBytes = await imageFile.readAsBytes();
+
+    if (imageBytes.length > 4_500_000) {
+      throw Exception(
+        'Image trop volumineuse (${(imageBytes.length / 1048576).toStringAsFixed(1)}Mo). '
+        'Veuillez réduire la résolution ou choisir une image plus légère.',
+      );
+    }
+
     final base64Image = base64Encode(imageBytes);
 
     final http.Response response;

@@ -107,6 +107,7 @@ async function callGemini(base64Image: string): Promise<string> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
   });
 
   if (!response.ok) {

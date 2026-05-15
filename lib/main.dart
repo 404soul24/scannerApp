@@ -86,10 +86,6 @@ class _ScannerScreenState extends State<ScannerScreen>
       duration: const Duration(seconds: 2),
     )..repeat(reverse: true);
     _ocrService = OCRService();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
     _loadHistory();
   }
 
@@ -101,7 +97,7 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   Future<void> _loadHistory() async {
     final history = await _storageService.loadHistory();
-    setState(() => _history = history);
+    if (mounted) setState(() => _history = history);
   }
 
   Future<void> _saveToHistory(WeeklyScanSession session) async {
@@ -664,7 +660,7 @@ class _ScannerScreenState extends State<ScannerScreen>
           ),
           const SizedBox(height: 28),
           const Text(
-            'Analyse par Gemini…',
+            'Analyse en cours…',
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white70),
           ),
           const SizedBox(height: 12),
