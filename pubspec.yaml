@@ -1,5 +1,5 @@
 name: absence_scanner_app
-description: "OCR-powered absence sheet scanner using Google ML Kit."
+description: "AI-powered absence sheet scanner using Google Gemini."
 publish_to: 'none'
 
 version: 1.0.0+1
@@ -13,8 +13,11 @@ dependencies:
 
   cupertino_icons: ^1.0.8
 
-  # OCR — on-device text recognition via Google ML Kit
-  google_mlkit_text_recognition: ^0.14.0
+  # Gemini AI for image analysis and absence parsing
+  google_generative_ai: ^0.4.6
+
+  # Environment variables for API key
+  flutter_dotenv: ^5.2.1
 
   # Image picking from camera or gallery
   image_picker: ^1.1.2
@@ -51,6 +54,7 @@ flutter:
 
   assets:
     - assets/icon/
+    - .env
 
 flutter_launcher_icons:
   android: true

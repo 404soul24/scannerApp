@@ -7,11 +7,14 @@ import 'package:csv/csv.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'ocr_service.dart';
 import 'models/absence_record.dart';
 import 'services/storage_service.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await dotenv.load(fileName: '.env');
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
   };
@@ -63,12 +66,11 @@ class ScannerScreen extends StatefulWidget {
 
 class _ScannerScreenState extends State<ScannerScreen>
     with SingleTickerProviderStateMixin {
-  final OCRService _ocrService = OCRService();
+  late final OCRService _ocrService;
   final ImagePicker _picker = ImagePicker();
   final StorageService _storageService = StorageService();
 
   bool _isProcessing = false;
-  bool _isModelLoading = false;
   List<StudentAbsence> _students = [];
   String _rawText = '';
   File? _selectedImage;
@@ -81,6 +83,13 @@ class _ScannerScreenState extends State<ScannerScreen>
   @override
   void initState() {
     super.initState();
+    final apiKey = dotenv.env['GEMINI_API_KEY'];
+    if (apiKey == null || apiKey.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showApiKeyError();
+      });
+    }
+    _ocrService = OCRService(apiKey: apiKey ?? '');
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
@@ -88,9 +97,30 @@ class _ScannerScreenState extends State<ScannerScreen>
     _loadHistory();
   }
 
+  void _showApiKeyError() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF161B22),
+        title: const Text('Clé API manquante', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'La clé API Gemini n\'est pas configurée.\n\n'
+          'Créez un fichier .env à la racine du projet avec :\n'
+          'GEMINI_API_KEY=votre_clé_ici',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK', style: TextStyle(color: Color(0xFF00BFA6))),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
-    _ocrService.dispose();
     _pulseController.dispose();
     super.dispose();
   }
@@ -186,22 +216,17 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     setState(() {
       _isProcessing = true;
-      _isModelLoading = true;
       _students = [];
       _rawText = '';
       _selectedImage = File(pickedFile.path);
     });
 
     try {
-      await Future.delayed(const Duration(milliseconds: 600));
-      setState(() => _isModelLoading = false);
-
-      final recognizedText = await _ocrService.extractText(_selectedImage!);
-      final students = _ocrService.findWeeklyAbsences(recognizedText);
+      final result = await _ocrService.analyzeSheet(_selectedImage!);
 
       setState(() {
-        _rawText = recognizedText.text;
-        _students = students;
+        _rawText = result.rawText;
+        _students = result.students;
         _isProcessing = false;
       });
 
@@ -213,7 +238,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Échec de l'OCR : $e"),
+            content: Text("Échec de l'analyse : $e"),
             backgroundColor: Colors.redAccent,
           ),
         );
@@ -335,7 +360,7 @@ class _ScannerScreenState extends State<ScannerScreen>
               pw.Text('Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}'),
               pw.Text('Durée par case: 2h30 (150 min)'),
               pw.SizedBox(height: 20),
-              pw.Table.fromTextArray(
+              pw.TableHelper.fromTextArray(
                 headers: ['N°', 'Nom', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'Total'],
                 data: _students.where((s) => s.hasAnyAbsence).map((student) {
                   return [
@@ -598,31 +623,19 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
           ),
           const SizedBox(height: 28),
-          Text(
-            _isModelLoading
-                ? 'Téléchargement du modèle OCR…'
-                : 'Analyse en cours…',
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white70),
+          const Text(
+            'Analyse par Gemini…',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white70),
           ),
-          if (!_isModelLoading) ...[
-            const SizedBox(height: 12),
-            const SizedBox(
-              width: 140,
-              child: LinearProgressIndicator(
-                backgroundColor: Color(0xFF1E252E),
-                color: Color(0xFF00BFA6),
-                minHeight: 3,
-              ),
+          const SizedBox(height: 12),
+          const SizedBox(
+            width: 140,
+            child: LinearProgressIndicator(
+              backgroundColor: Color(0xFF1E252E),
+              color: Color(0xFF00BFA6),
+              minHeight: 3,
             ),
-          ],
-          if (_isModelLoading) ...[
-            const SizedBox(height: 12),
-            const Text(
-              'Première utilisation : téléchargement\ndu modèle de reconnaissance…',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: Colors.white38),
-            ),
-          ],
+          ),
         ],
       ),
     );
