@@ -1,6 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Camera permission — required by image_picker for taking photos -->
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Internet permission — required for Gemini API calls -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Internet permission — required for Gemini API calls -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="Scan d'Absences"
         android:name="${applicationName}"

@@ -7,14 +7,11 @@ import 'package:csv/csv.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'ocr_service.dart';
 import 'models/absence_record.dart';
 import 'services/storage_service.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await dotenv.load(fileName: '.env');
+void main() {
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
   };
@@ -66,14 +63,16 @@ class ScannerScreen extends StatefulWidget {
 
 class _ScannerScreenState extends State<ScannerScreen>
     with SingleTickerProviderStateMixin {
-  late final OCRService _ocrService;
+  late OCRService _ocrService;
   final ImagePicker _picker = ImagePicker();
   final StorageService _storageService = StorageService();
 
+  String? _apiKey;
   bool _isProcessing = false;
   List<StudentAbsence> _students = [];
   String _rawText = '';
   File? _selectedImage;
+  String? _lastImagePath;
   List<WeeklyScanSession> _history = [];
   String _searchQuery = '';
   bool _showOnlyAbsences = false;
@@ -83,41 +82,26 @@ class _ScannerScreenState extends State<ScannerScreen>
   @override
   void initState() {
     super.initState();
-    final apiKey = dotenv.env['GEMINI_API_KEY'];
-    if (apiKey == null || apiKey.isEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _showApiKeyError();
-      });
-    }
-    _ocrService = OCRService(apiKey: apiKey ?? '');
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
     )..repeat(reverse: true);
+    _ocrService = OCRService(apiKey: '');
+    _loadApiKey();
     _loadHistory();
   }
 
-  void _showApiKeyError() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF161B22),
-        title: const Text('Clé API manquante', style: TextStyle(color: Colors.white)),
-        content: const Text(
-          'La clé API Gemini n\'est pas configurée.\n\n'
-          'Créez un fichier .env à la racine du projet avec :\n'
-          'GEMINI_API_KEY=votre_clé_ici',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('OK', style: TextStyle(color: Color(0xFF00BFA6))),
-          ),
-        ],
-      ),
-    );
+  Future<void> _loadApiKey() async {
+    final saved = await _storageService.getApiKey();
+    if (saved != null && saved.isNotEmpty) {
+      setState(() {
+        _apiKey = saved;
+        _ocrService = OCRService(apiKey: saved);
+      });
+    }
   }
+
+  bool get _hasApiKey => _apiKey != null && _apiKey!.isNotEmpty;
 
   @override
   void dispose() {
@@ -205,6 +189,11 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   Future<void> _pickAndScan() async {
+    if (!_hasApiKey) {
+      _showSettings(showApiKeyField: true);
+      return;
+    }
+
     final source = await _showImageSourceSheet();
     if (source == null) return;
 
@@ -219,6 +208,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       _students = [];
       _rawText = '';
       _selectedImage = File(pickedFile.path);
+      _lastImagePath = pickedFile.path;
     });
 
     try {
@@ -230,6 +220,50 @@ class _ScannerScreenState extends State<ScannerScreen>
         _isProcessing = false;
       });
 
+      if (_students.isNotEmpty) {
+        _showVerificationScreen();
+      }
+    } catch (e) {
+      setState(() => _isProcessing = false);
+      if (mounted) {
+        final isOverload = e.toString().contains('503') ||
+            e.toString().contains('UNAVAILABLE') ||
+            e.toString().contains('saturé');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              isOverload
+                  ? 'Service temporairement saturé. Réessayez dans quelques minutes.'
+                  : "Échec de l'analyse : $e",
+            ),
+            backgroundColor: Colors.redAccent,
+            duration: const Duration(seconds: 6),
+            action: isOverload
+                ? SnackBarAction(
+                    label: 'Réessayer',
+                    textColor: Colors.white,
+                    onPressed: _retryLastScan,
+                  )
+                : null,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _retryLastScan() async {
+    if (_lastImagePath == null) return;
+    setState(() {
+      _isProcessing = true;
+      _selectedImage = File(_lastImagePath!);
+    });
+    try {
+      final result = await _ocrService.analyzeSheet(_selectedImage!);
+      setState(() {
+        _rawText = result.rawText;
+        _students = result.students;
+        _isProcessing = false;
+      });
       if (_students.isNotEmpty) {
         _showVerificationScreen();
       }
@@ -467,58 +501,200 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
   }
 
-  void _showDataManagement() {
+  final _apiKeyController = TextEditingController();
+  bool _obscureApiKey = true;
+
+  void _showSettings({bool showApiKeyField = false}) {
+    _apiKeyController.text = _apiKey ?? '';
+    _obscureApiKey = true;
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF161B22),
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(
+          left: 20, right: 20, top: 20,
+          bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
                 width: 40, height: 4,
                 decoration: BoxDecoration(
                   color: Colors.white24,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              const SizedBox(height: 20),
-              const Text(
-                'Gestion des données',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                const Icon(Icons.settings_rounded, color: Color(0xFF00BFA6), size: 20),
+                const SizedBox(width: 10),
+                const Text(
+                  'Paramètres',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  onTap: () => Navigator.pop(ctx),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.close_rounded, color: Colors.white54, size: 18),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+
+            // API Key section
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0D1117),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: _hasApiKey ? const Color(0xFF00BFA6).withValues(alpha: 0.3) : Colors.orangeAccent.withValues(alpha: 0.3),
+                ),
               ),
-              const SizedBox(height: 20),
-              ListTile(
-                leading: const Icon(Icons.upload_rounded, color: Color(0xFF00BFA6)),
-                title: const Text('Exporter l\'historique', style: TextStyle(color: Colors.white)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _exportHistory();
-                },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.key_rounded, color: _hasApiKey ? const Color(0xFF00BFA6) : Colors.orangeAccent, size: 18),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Clé API Gemini',
+                        style: TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w600,
+                          color: _hasApiKey ? Colors.white : Colors.orangeAccent,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (_hasApiKey)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF00BFA6).withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text('Configurée', style: TextStyle(fontSize: 11, color: Color(0xFF00BFA6), fontWeight: FontWeight.w600)),
+                        )
+                      else
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: Colors.orangeAccent.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text('Manquante', style: TextStyle(fontSize: 11, color: Colors.orangeAccent, fontWeight: FontWeight.w600)),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _apiKeyController,
+                    obscureText: _obscureApiKey,
+                    style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace'),
+                    decoration: InputDecoration(
+                      hintText: 'Entrez votre clé API Gemini',
+                      hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+                      filled: true,
+                      fillColor: const Color(0xFF161B22),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _obscureApiKey ? Icons.visibility_off_rounded : Icons.visibility_rounded,
+                          color: Colors.white38, size: 18,
+                        ),
+                        onPressed: () => setState(() => _obscureApiKey = !_obscureApiKey),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () async {
+                        final key = _apiKeyController.text.trim();
+                        if (key.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Veuillez entrer une clé API'), backgroundColor: Colors.redAccent),
+                          );
+                          return;
+                        }
+                        await _storageService.saveApiKey(key);
+                        setState(() {
+                          _apiKey = key;
+                          _ocrService = OCRService(apiKey: key);
+                        });
+                        Navigator.pop(ctx);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Clé API enregistrée'), backgroundColor: Color(0xFF00BFA6)),
+                        );
+                      },
+                      icon: const Icon(Icons.save_rounded, size: 16),
+                      label: const Text('Enregistrer'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF00BFA6),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              ListTile(
-                leading: const Icon(Icons.download_rounded, color: Color(0xFF448AFF)),
-                title: const Text('Importer un fichier', style: TextStyle(color: Colors.white)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _importHistory();
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.delete_sweep_rounded, color: Colors.redAccent),
-                title: const Text('Effacer l\'historique', style: TextStyle(color: Colors.white)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _clearHistory();
-                },
-              ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 16),
+
+            // Data Management section
+            const Text('Gestion des données', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white54)),
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.upload_rounded, color: Color(0xFF00BFA6), size: 20),
+              title: const Text('Exporter l\'historique', style: TextStyle(color: Colors.white, fontSize: 14)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _exportHistory();
+              },
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.download_rounded, color: Color(0xFF448AFF), size: 20),
+              title: const Text('Importer un fichier', style: TextStyle(color: Colors.white, fontSize: 14)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _importHistory();
+              },
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.delete_sweep_rounded, color: Colors.redAccent, size: 20),
+              title: const Text('Effacer l\'historique', style: TextStyle(color: Colors.white, fontSize: 14)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _clearHistory();
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -585,9 +761,12 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
           ],
           IconButton(
-            icon: const Icon(Icons.settings_rounded),
-            tooltip: 'Gestion données',
-            onPressed: _showDataManagement,
+            icon: Icon(
+              _hasApiKey ? Icons.settings_rounded : Icons.key_rounded,
+              color: _hasApiKey ? null : Colors.orangeAccent,
+            ),
+            tooltip: 'Paramètres',
+            onPressed: () => _showSettings(),
           ),
         ],
       ),

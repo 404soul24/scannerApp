@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:google_generative_ai/google_generative_ai.dart';
@@ -11,63 +12,75 @@ class ScanResult {
 }
 
 class OCRService {
-  final GenerativeModel _model;
+  static const _models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+  static const _retryDelays = [
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+  ];
 
-  OCRService({required String apiKey})
-      : _model = GenerativeModel(
-          model: 'gemini-2.5-flash',
-          apiKey: apiKey,
-          generationConfig: GenerationConfig(
-            responseMimeType: 'application/json',
-            responseSchema: Schema(SchemaType.object, properties: {
-              'rawText': Schema(SchemaType.string,
-                  description: 'Texte brut complet extrait de la feuille'),
-              'students': Schema(SchemaType.array,
-                  description: 'Liste des élèves',
-                  items: Schema(SchemaType.object, properties: {
-                    'number': Schema(SchemaType.integer,
-                        description: 'Numéro de l\'élève'),
-                    'name': Schema(SchemaType.string,
-                        description: 'Nom complet de l\'élève'),
-                    'week': Schema(SchemaType.array,
-                        description: 'Semaine (LUN, MAR, MER, JEU, VEN, SAM)',
-                        items: Schema(SchemaType.object, properties: {
-                          'dayName': Schema(SchemaType.string,
-                              description:
-                                  'Nom du jour (LUN, MAR, MER, JEU, VEN, SAM)'),
-                          'slots': Schema(SchemaType.array,
-                              description: '4 créneaux horaires',
-                              items: Schema(SchemaType.object, properties: {
-                                'isMarked': Schema(SchemaType.boolean,
-                                    description:
-                                        'true si la case est cochée/marquée'),
-                                'markType': Schema(SchemaType.string,
-                                    description:
-                                        'Type de marque: "X", "/", "A", ou "" si non marqué'),
-                              })),
-                        })),
-                  })),
-            }),
-          ),
-        );
+  final String _apiKey;
+
+  OCRService({required String apiKey}) : _apiKey = apiKey;
+
+  GenerativeModel _createModel(String model) {
+    return GenerativeModel(
+      model: model,
+      apiKey: _apiKey,
+      generationConfig: GenerationConfig(
+        responseMimeType: 'application/json',
+      ),
+    );
+  }
+
+  bool _isOverloadedError(Object error) {
+    if (error is GenerativeAIException) {
+      return error.message.contains('503') ||
+          error.message.contains('UNAVAILABLE') ||
+          error.message.contains('high demand') ||
+          error.message.contains('Resource has been exhausted');
+    }
+    return false;
+  }
 
   Future<ScanResult> analyzeSheet(File imageFile) async {
     final imageBytes = await imageFile.readAsBytes();
     final mimeType = _getMimeType(imageFile.path);
+    final prompt = _buildPrompt();
 
-    final response = await _model.generateContent([
-      Content.multi([
-        TextPart(_buildPrompt()),
-        DataPart(mimeType, imageBytes),
-      ]),
-    ]);
+    for (final modelName in _models) {
+      for (int attempt = 0; attempt <= _retryDelays.length; attempt++) {
+        try {
+          final model = _createModel(modelName);
+          final response = await model.generateContent([
+            Content.multi([
+              TextPart(prompt),
+              DataPart(mimeType, imageBytes),
+            ]),
+          ]);
 
-    final text = response.text;
-    if (text == null || text.isEmpty) {
-      throw Exception("Gemini n'a retourné aucun résultat");
+          final text = response.text;
+          if (text == null || text.isEmpty) {
+            throw Exception("Gemini n'a retourné aucun résultat");
+          }
+
+          return _parseResponse(text);
+        } catch (e) {
+          if (_isOverloadedError(e) && attempt < _retryDelays.length) {
+            await Future.delayed(_retryDelays[attempt]);
+            continue;
+          }
+          if (_isOverloadedError(e) && modelName != _models.last) {
+            break;
+          }
+          rethrow;
+        }
+      }
     }
 
-    return _parseResponse(text);
+    throw Exception(
+      'Le service Gemini est temporairement saturé. Réessayez dans quelques minutes.',
+    );
   }
 
   String _buildPrompt() {
@@ -88,7 +101,25 @@ Instructions :
 4. Si un créneau n'est pas marqué, mets isMarked à false et markType à ""
 5. Extrais aussi le texte brut visible dans la feuille et mets-le dans rawText
 
-Retourne UNIQUEMENT un objet JSON valide. Ne mets aucun texte avant ou après le JSON.''';
+Retourne UNIQUEMENT un objet JSON valide avec la structure exacte :
+{
+  "rawText": "...",
+  "students": [
+    {
+      "number": 1,
+      "name": "Nom Prénom",
+      "week": [
+        { "dayName": "LUN", "slots": [{"isMarked": false, "markType": ""}, ...] },
+        { "dayName": "MAR", "slots": [{"isMarked": false, "markType": ""}, ...] },
+        { "dayName": "MER", "slots": [...] },
+        { "dayName": "JEU", "slots": [...] },
+        { "dayName": "VEN", "slots": [...] },
+        { "dayName": "SAM", "slots": [...] }
+      ]
+    }
+  ]
+}
+Ne mets aucun texte avant ou après le JSON.''';
   }
 
   String _getMimeType(String path) {
@@ -113,8 +144,9 @@ Retourne UNIQUEMENT un objet JSON valide. Ne mets aucun texte avant ou après le
 
     final List<dynamic> studentsJson =
         data['students'] as List<dynamic>? ?? [];
-    final students =
-        studentsJson.map((s) => _parseStudent(s as Map<String, dynamic>)).toList();
+    final students = studentsJson
+        .map((s) => _parseStudent(s as Map<String, dynamic>))
+        .toList();
 
     return ScanResult(students: students, rawText: rawText);
   }
@@ -126,20 +158,18 @@ Retourne UNIQUEMENT un objet JSON valide. Ne mets aucun texte avant ou après le
     final name = json['name'] as String? ?? '';
 
     final List<dynamic> weekJson = json['week'] as List<dynamic>? ?? [];
-    final parsedDays = weekJson
-        .map((d) => _parseDay(d as Map<String, dynamic>))
-        .toList();
+    final parsedDays =
+        weekJson.map((d) => _parseDay(d as Map<String, dynamic>)).toList();
 
     final Map<String, DailyAbsence> dayMap = {};
     for (final day in parsedDays) {
       dayMap[day.dayName.toUpperCase()] = day;
     }
 
-    final week =
-        _orderedDays.map((dayName) {
-          if (dayMap.containsKey(dayName)) return dayMap[dayName]!;
-          return DailyAbsence(dayName: dayName);
-        }).toList();
+    final week = _orderedDays.map((dayName) {
+      if (dayMap.containsKey(dayName)) return dayMap[dayName]!;
+      return DailyAbsence(dayName: dayName);
+    }).toList();
 
     return StudentAbsence(number: number, name: name, week: week);
   }
