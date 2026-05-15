@@ -6,13 +6,13 @@ import 'models/absence_record.dart';
 
 class ScanResult {
   final String scannedDate;
-  final int totalAbsentCount;
+  final int totalStudentsCount;
   final List<StudentAbsence> students;
   final String rawText;
 
   ScanResult({
     required this.scannedDate,
-    required this.totalAbsentCount,
+    required this.totalStudentsCount,
     required this.students,
     required this.rawText,
   });
@@ -52,21 +52,23 @@ class OCRService {
           'scanned_date': Schema(SchemaType.string,
               description:
                   'La date inscrite sur la feuille si visible, sinon "unknown"'),
-          'total_absent_count': Schema(SchemaType.integer,
-              description:
-                  'Nombre total d\'élèves absents détectés (pas le nombre de cases)'),
-          'absents': Schema(SchemaType.array,
-              description: 'Liste des élèves absents',
+          'total_students_count': Schema(SchemaType.integer,
+              description: 'Nombre total d\'élèves sur la feuille'),
+          'students': Schema(SchemaType.array,
+              description: 'Liste complète de tous les élèves',
               items: Schema(SchemaType.object, properties: {
                 'student_name': Schema(SchemaType.string,
                     description:
                         'Prénom et Nom en majuscules, format "Firstname LASTNAME"'),
+                'is_absent': Schema(SchemaType.boolean,
+                    description:
+                        'true si au moins une marque d\'absence est trouvée, false si présent ou cases vides'),
                 'absence_count': Schema(SchemaType.integer,
                     description:
-                        'Nombre total de marques d\'absence pour cet élève'),
+                        'Nombre total de marques d\'absence (0 si présent)'),
                 'total_hours_absent': Schema(SchemaType.number,
                     description:
-                        'Calculé comme absence_count × 2.5 (chaque case = 2.5h)'),
+                        'Calculé comme absence_count × 2.5 (0.0 si présent)'),
               })),
         }),
       ),
@@ -131,10 +133,12 @@ class OCRService {
         'Marques d\'absence à rechercher : "X", "/", "A", "Abs", "☑" ou toute case cochée.\n'
         'Ignore les cases vides ou les marques "P", "V" qui signifient présent.\n'
         '\n'
-        'Pour chaque élève absent :\n'
-        '1. Compte TOUTES les marques d\'absence sur la semaine entière.\n'
-        '2. Calcule total_hours_absent = absence_count × 2.5.\n'
-        '3. N\'inclus que les élèves qui ont au moins une marque d\'absence.\n'
+        'Extrais TOUS les élèves de la feuille, même ceux qui n\'ont aucune absence.\n'
+        'Pour chaque élève :\n'
+        '1. is_absent = true si au moins une marque d\'absence est trouvée.\n'
+        '2. is_absent = false si aucune marque (cases vides ou marques de présence).\n'
+        '3. absence_count = nombre total de marques d\'absence (0 si présent).\n'
+        '4. total_hours_absent = absence_count × 2.5 (0.0 si présent).\n'
         '\n'
         'Retourne UNIQUEMENT un objet JSON valide. Pas de blocs markdown.';
   }
@@ -163,21 +167,22 @@ class OCRService {
     }
 
     final scannedDate = data['scanned_date'] as String? ?? 'unknown';
-    final totalAbsentCount = data['total_absent_count'] as int? ?? 0;
+    final totalStudentsCount = data['total_students_count'] as int? ?? 0;
     final rawText = jsonString;
 
-    final List<dynamic> absentsJson =
-        data['absents'] as List<dynamic>? ?? [];
+    final List<dynamic> studentsJson =
+        data['students'] as List<dynamic>? ?? [];
     final students = <StudentAbsence>[];
 
-    for (int i = 0; i < absentsJson.length; i++) {
+    for (int i = 0; i < studentsJson.length; i++) {
       try {
-        final entry = absentsJson[i] as Map<String, dynamic>;
+        final entry = studentsJson[i] as Map<String, dynamic>;
         final name = entry['student_name'] as String? ?? 'Inconnu ${i + 1}';
+        final isAbsent = entry['is_absent'] as bool? ?? false;
         final absenceCount = entry['absence_count'] as int? ?? 0;
         final totalHours = entry['total_hours_absent'] as num? ?? 0.0;
 
-        students.add(_buildStudent(i + 1, name, absenceCount, totalHours));
+        students.add(_buildStudent(i + 1, name, isAbsent, absenceCount, totalHours));
       } catch (e) {
         continue;
       }
@@ -185,27 +190,28 @@ class OCRService {
 
     return ScanResult(
       scannedDate: scannedDate,
-      totalAbsentCount: totalAbsentCount,
+      totalStudentsCount: totalStudentsCount,
       students: students,
       rawText: rawText,
     );
   }
 
   StudentAbsence _buildStudent(
-      int number, String name, int absenceCount, num totalHours) {
+      int number, String name, bool isAbsent, int absenceCount, num totalHours) {
     final week = _orderedDays.map((dayName) {
       return DailyAbsence(dayName: dayName);
     }).toList();
 
-    int slotsToMark = absenceCount;
-    int maxSlots = 24;
-    if (slotsToMark > maxSlots) slotsToMark = maxSlots;
+    if (isAbsent && absenceCount > 0) {
+      int slotsToMark = absenceCount;
+      if (slotsToMark > 24) slotsToMark = 24;
 
-    int marked = 0;
-    for (int d = 0; d < week.length && marked < slotsToMark; d++) {
-      for (int s = 0; s < 4 && marked < slotsToMark; s++) {
-        week[d].slots[s] = AbsenceSlot(isMarked: true, markType: 'X');
-        marked++;
+      int marked = 0;
+      for (int d = 0; d < week.length && marked < slotsToMark; d++) {
+        for (int s = 0; s < 4 && marked < slotsToMark; s++) {
+          week[d].slots[s] = AbsenceSlot(isMarked: true, markType: 'X');
+          marked++;
+        }
       }
     }
 

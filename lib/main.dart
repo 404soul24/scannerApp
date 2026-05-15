@@ -936,6 +936,7 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   Widget _buildInfoBar() {
     final absentCount = _students.where((s) => s.hasAnyAbsence).length;
+    final totalStudents = _students.length;
     final totalMinutes = _students.fold(0, (sum, s) => sum + s.getTotalMinutes());
     final totalHours = totalMinutes ~/ 60;
     final totalMins = totalMinutes % 60;
@@ -948,9 +949,9 @@ class _ScannerScreenState extends State<ScannerScreen>
           children: [
             _buildInfoItem(Icons.people_rounded, '$absentCount', 'Absents'),
             Container(width: 1, height: 40, color: Colors.white12),
-            _buildInfoItem(Icons.timer_rounded, '${totalHours}h ${totalMins}min', 'Total'),
+            _buildInfoItem(Icons.people_outline_rounded, '$totalStudents', 'Élèves'),
             Container(width: 1, height: 40, color: Colors.white12),
-            _buildInfoItem(Icons.access_time_rounded, '2h30', 'Par case'),
+            _buildInfoItem(Icons.timer_rounded, '${totalHours}h ${totalMins}min', 'Total'),
           ],
         ),
       ),
@@ -1038,11 +1039,21 @@ class _ScannerScreenState extends State<ScannerScreen>
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Text(
-                    _filteredStudents.isNotEmpty && _filteredStudents.any((s) => s.hasAnyAbsence)
-                        ? 'Élèves absents (${_filteredStudents.where((s) => s.hasAnyAbsence).length})'
-                        : 'Aucune absence détectée',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _students.any((s) => s.hasAnyAbsence)
+                            ? '${_students.where((s) => s.hasAnyAbsence).length} absent(s)'
+                            : 'Aucune absence détectée',
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white),
+                      ),
+                      if (_students.isNotEmpty)
+                        Text(
+                          'sur ${_students.length} élève(s)',
+                          style: const TextStyle(fontSize: 13, color: Colors.white38),
+                        ),
+                    ],
                   ),
                 ),
               ],
