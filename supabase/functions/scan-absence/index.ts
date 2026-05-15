@@ -2,8 +2,6 @@
 // Acts as a secure proxy to Google Gemini 2.5 Flash API.
 // The Gemini API key is stored as a server-side secret, not exposed to clients.
 
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 if (!GEMINI_API_KEY) {
   throw new Error("GEMINI_API_KEY environment variable is not set");
@@ -24,8 +22,8 @@ const USER_PROMPT =
   "La feuille contient une liste d'élèves avec des cases à cocher pour chaque jour " +
   "(LUN, MAR, MER, JEU, VEN, SAM). Chaque jour a 4 créneaux.\n" +
   "\n" +
-  "Marques d'absence à rechercher : \"X\", \"/\", \"A\", \"Abs\", \"☑\" ou toute case cochée.\n" +
-  "Ignore les cases vides ou les marques \"P\", \"V\" qui signifient présent.\n" +
+  'Marques d\'absence à rechercher : "X", "/", "A", "Abs", "☑" ou toute case cochée.\n' +
+  'Ignore les cases vides ou les marques "P", "V" qui signifient présent.\n' +
   "\n" +
   "Extrais TOUS les élèves de la feuille, même ceux qui n'ont aucune absence.\n" +
   "Pour chaque élève :\n" +
@@ -37,37 +35,37 @@ const USER_PROMPT =
   "Retourne UNIQUEMENT un objet JSON valide. Pas de blocs markdown.";
 
 const RESPONSE_SCHEMA = {
-  type: "object",
+  type: "OBJECT",
   properties: {
     scanned_date: {
-      type: "string",
+      type: "STRING",
       description: "La date inscrite sur la feuille si visible, sinon 'unknown'",
     },
     total_students_count: {
-      type: "integer",
+      type: "INTEGER",
       description: "Nombre total d'élèves sur la feuille",
     },
     students: {
-      type: "array",
+      type: "ARRAY",
       description: "Liste complète de tous les élèves",
       items: {
-        type: "object",
+        type: "OBJECT",
         properties: {
           student_name: {
-            type: "string",
+            type: "STRING",
             description: 'Prénom et Nom, format "Firstname LASTNAME"',
           },
           is_absent: {
-            type: "boolean",
+            type: "BOOLEAN",
             description:
               "true si au moins une marque d'absence est trouvée, false si présent",
           },
           absence_count: {
-            type: "integer",
+            type: "INTEGER",
             description: "Nombre total de marques d'absence (0 si présent)",
           },
           total_hours_absent: {
-            type: "number",
+            type: "NUMBER",
             description: "Calculé comme absence_count × 2.5 (0.0 si présent)",
           },
         },
@@ -167,16 +165,17 @@ Deno.serve(async (req) => {
       },
     });
   } catch (error) {
-    console.error("Error:", error.message);
+    const err = error as Error;
+    console.error("Error:", err.message);
 
-    const status = error.message.includes("503") ||
-        error.message.includes("high demand")
+    const status = err.message.includes("503") ||
+        err.message.includes("high demand")
       ? 503
       : 500;
 
     return new Response(
       JSON.stringify({
-        error: error.message || "Internal server error",
+        error: err.message || "Internal server error",
       }),
       {
         status,
