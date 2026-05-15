@@ -1,7 +1,6 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:google_generative_ai/google_generative_ai.dart';
+import 'package:http/http.dart' as http;
 import 'models/absence_record.dart';
 
 class ScanResult {
@@ -19,143 +18,42 @@ class ScanResult {
 }
 
 class OCRService {
-  static const _models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-  static const _retryDelays = [
-    Duration(seconds: 1),
-    Duration(seconds: 2),
-    Duration(seconds: 4),
-  ];
+  static const String _functionUrl =
+      'https://xpsuryegelcfwjwpmxud.supabase.co/functions/v1/scan-absence';
 
-  // TODO: SECURITY WARNING — Before production release, this Gemini API call
-  //       must be moved to a backend proxy / cloud function. The API key
-  //       stored here or in SharedPreferences can be extracted via APK
-  //       decompilation, leading to unauthorized usage and billing abuse.
-  //       See: https://cloud.google.com/docs/authentication/api-keys#securing
-  final String _apiKey;
-
-  OCRService({required String apiKey}) : _apiKey = apiKey;
-
-  GenerativeModel _createModel(String model) {
-    return GenerativeModel(
-      model: model,
-      apiKey: _apiKey,
-      systemInstruction: Content.text(
-        'Tu es un assistant spécialisé dans l\'extraction de données de '
-        'feuilles d\'absences scolaires. Tu dois analyser l\'image fournie '
-        'et retourner UNIQUEMENT un objet JSON valide, sans aucun texte '
-        'avant ou après. Ne mets pas de blocs markdown (```json).',
-      ),
-      generationConfig: GenerationConfig(
-        temperature: 0.0,
-        responseMimeType: 'application/json',
-        responseSchema: Schema(SchemaType.object, properties: {
-          'scanned_date': Schema(SchemaType.string,
-              description:
-                  'La date inscrite sur la feuille si visible, sinon "unknown"'),
-          'total_students_count': Schema(SchemaType.integer,
-              description: 'Nombre total d\'élèves sur la feuille'),
-          'students': Schema(SchemaType.array,
-              description: 'Liste complète de tous les élèves',
-              items: Schema(SchemaType.object, properties: {
-                'student_name': Schema(SchemaType.string,
-                    description:
-                        'Prénom et Nom en majuscules, format "Firstname LASTNAME"'),
-                'is_absent': Schema(SchemaType.boolean,
-                    description:
-                        'true si au moins une marque d\'absence est trouvée, false si présent ou cases vides'),
-                'absence_count': Schema(SchemaType.integer,
-                    description:
-                        'Nombre total de marques d\'absence (0 si présent)'),
-                'total_hours_absent': Schema(SchemaType.number,
-                    description:
-                        'Calculé comme absence_count × 2.5 (0.0 si présent)'),
-              })),
-        }),
-      ),
-    );
-  }
-
-  bool _isOverloadedError(Object error) {
-    if (error is GenerativeAIException) {
-      return error.message.contains('503') ||
-          error.message.contains('UNAVAILABLE') ||
-          error.message.contains('high demand') ||
-          error.message.contains('Resource has been exhausted');
-    }
-    return false;
-  }
+  static const String _anonKey =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhwc3VyeWVnZWxjZndqd3BteHVkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NjI0NzIsImV4cCI6MjA5NDQzODQ3Mn0.Lc2YvNa72BylvMTvvgFFmsIohWCf9G75GqEZGoUJ8W0';
 
   Future<ScanResult> analyzeSheet(File imageFile) async {
     final imageBytes = await imageFile.readAsBytes();
-    final mimeType = _getMimeType(imageFile.path);
+    final base64Image = base64Encode(imageBytes);
 
-    for (final modelName in _models) {
-      for (int attempt = 0; attempt <= _retryDelays.length; attempt++) {
-        try {
-          final model = _createModel(modelName);
-          final response = await model.generateContent([
-            Content.multi([
-              TextPart(_buildPrompt()),
-              DataPart(mimeType, imageBytes),
-            ]),
-          ]);
-
-          final text = response.text;
-          if (text == null || text.isEmpty) {
-            throw Exception("Gemini n'a retourné aucun résultat");
-          }
-
-          return _parseResponse(text);
-        } catch (e) {
-          if (_isOverloadedError(e) && attempt < _retryDelays.length) {
-            await Future.delayed(_retryDelays[attempt]);
-            continue;
-          }
-          if (_isOverloadedError(e) && modelName != _models.last) {
-            break;
-          }
-          rethrow;
-        }
-      }
+    final http.Response response;
+    try {
+      response = await http.post(
+        Uri.parse(_functionUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_anonKey',
+        },
+        body: jsonEncode({'base64Image': base64Image}),
+      );
+    } on http.ClientException catch (e) {
+      throw Exception(
+        'Impossible de contacter le serveur: ${e.message}',
+      );
     }
 
-    throw Exception(
-      'Le service Gemini est temporairement saturé. Réessayez dans quelques minutes.',
-    );
-  }
-
-  String _buildPrompt() {
-    return 'Analyse cette feuille d\'absences hebdomadaire et extraits les informations suivantes.\n'
-        '\n'
-        'La feuille contient une liste d\'élèves avec des cases à cocher pour chaque jour '
-        '(LUN, MAR, MER, JEU, VEN, SAM). Chaque jour a 4 créneaux.\n'
-        '\n'
-        'Marques d\'absence à rechercher : "X", "/", "A", "Abs", "☑" ou toute case cochée.\n'
-        'Ignore les cases vides ou les marques "P", "V" qui signifient présent.\n'
-        '\n'
-        'Extrais TOUS les élèves de la feuille, même ceux qui n\'ont aucune absence.\n'
-        'Pour chaque élève :\n'
-        '1. is_absent = true si au moins une marque d\'absence est trouvée.\n'
-        '2. is_absent = false si aucune marque (cases vides ou marques de présence).\n'
-        '3. absence_count = nombre total de marques d\'absence (0 si présent).\n'
-        '4. total_hours_absent = absence_count × 2.5 (0.0 si présent).\n'
-        '\n'
-        'Retourne UNIQUEMENT un objet JSON valide. Pas de blocs markdown.';
-  }
-
-  String _getMimeType(String path) {
-    final ext = path.split('.').last.toLowerCase();
-    switch (ext) {
-      case 'jpg':
-      case 'jpeg':
-        return 'image/jpeg';
-      case 'png':
-        return 'image/png';
-      case 'webp':
-        return 'image/webp';
-      default:
-        return 'image/jpeg';
+    if (response.statusCode != 200) {
+      final snippet = response.body.length > 200
+          ? response.body.substring(0, 200)
+          : response.body;
+      throw Exception(
+        'Erreur serveur (${response.statusCode}): $snippet',
+      );
     }
+
+    return _parseResponse(response.body);
   }
 
   ScanResult _parseResponse(String jsonString) {
@@ -182,7 +80,8 @@ class OCRService {
         final absenceCount = entry['absence_count'] as int? ?? 0;
         final totalHours = entry['total_hours_absent'] as num? ?? 0.0;
 
-        students.add(_buildStudent(i + 1, name, isAbsent, absenceCount, totalHours));
+        students.add(
+            _buildStudent(i + 1, name, isAbsent, absenceCount, totalHours));
       } catch (e) {
         continue;
       }
@@ -196,11 +95,11 @@ class OCRService {
     );
   }
 
-  StudentAbsence _buildStudent(
-      int number, String name, bool isAbsent, int absenceCount, num totalHours) {
-    final week = _orderedDays.map((dayName) {
-      return DailyAbsence(dayName: dayName);
-    }).toList();
+  StudentAbsence _buildStudent(int number, String name, bool isAbsent,
+      int absenceCount, num totalHours) {
+    final week = _orderedDays
+        .map((dayName) => DailyAbsence(dayName: dayName))
+        .toList();
 
     if (isAbsent && absenceCount > 0) {
       int slotsToMark = absenceCount;

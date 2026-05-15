@@ -67,7 +67,6 @@ class _ScannerScreenState extends State<ScannerScreen>
   final ImagePicker _picker = ImagePicker();
   final StorageService _storageService = StorageService();
 
-  String? _apiKey;
   bool _isProcessing = false;
   List<StudentAbsence> _students = [];
   String _rawText = '';
@@ -86,22 +85,13 @@ class _ScannerScreenState extends State<ScannerScreen>
       vsync: this,
       duration: const Duration(seconds: 2),
     )..repeat(reverse: true);
-    _ocrService = OCRService(apiKey: '');
-    _loadApiKey();
+    _ocrService = OCRService();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat(reverse: true);
     _loadHistory();
   }
-
-  Future<void> _loadApiKey() async {
-    final saved = await _storageService.getApiKey();
-    if (saved != null && saved.isNotEmpty) {
-      setState(() {
-        _apiKey = saved;
-        _ocrService = OCRService(apiKey: saved);
-      });
-    }
-  }
-
-  bool get _hasApiKey => _apiKey != null && _apiKey!.isNotEmpty;
 
   @override
   void dispose() {
@@ -189,11 +179,6 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   Future<void> _pickAndScan() async {
-    if (!_hasApiKey) {
-      _showSettings(showApiKeyField: true);
-      return;
-    }
-
     final source = await _showImageSourceSheet();
     if (source == null) return;
 
@@ -226,25 +211,16 @@ class _ScannerScreenState extends State<ScannerScreen>
     } catch (e) {
       setState(() => _isProcessing = false);
       if (mounted) {
-        final isOverload = e.toString().contains('503') ||
-            e.toString().contains('UNAVAILABLE') ||
-            e.toString().contains('saturé');
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              isOverload
-                  ? 'Service temporairement saturé. Réessayez dans quelques minutes.'
-                  : "Échec de l'analyse : $e",
-            ),
+            content: Text("Échec de l'analyse : $e"),
             backgroundColor: Colors.redAccent,
             duration: const Duration(seconds: 6),
-            action: isOverload
-                ? SnackBarAction(
-                    label: 'Réessayer',
-                    textColor: Colors.white,
-                    onPressed: _retryLastScan,
-                  )
-                : null,
+            action: SnackBarAction(
+              label: 'Réessayer',
+              textColor: Colors.white,
+              onPressed: _retryLastScan,
+            ),
           ),
         );
       }
@@ -501,13 +477,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
   }
 
-  final _apiKeyController = TextEditingController();
-  bool _obscureApiKey = true;
-
-  void _showSettings({bool showApiKeyField = false}) {
-    _apiKeyController.text = _apiKey ?? '';
-    _obscureApiKey = true;
-
+  void _showSettings() {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF161B22),
@@ -557,112 +527,6 @@ class _ScannerScreenState extends State<ScannerScreen>
               ],
             ),
             const SizedBox(height: 20),
-
-            // API Key section
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0D1117),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: _hasApiKey ? const Color(0xFF00BFA6).withValues(alpha: 0.3) : Colors.orangeAccent.withValues(alpha: 0.3),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.key_rounded, color: _hasApiKey ? const Color(0xFF00BFA6) : Colors.orangeAccent, size: 18),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Clé API Gemini',
-                        style: TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.w600,
-                          color: _hasApiKey ? Colors.white : Colors.orangeAccent,
-                        ),
-                      ),
-                      const Spacer(),
-                      if (_hasApiKey)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF00BFA6).withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: const Text('Configurée', style: TextStyle(fontSize: 11, color: Color(0xFF00BFA6), fontWeight: FontWeight.w600)),
-                        )
-                      else
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: Colors.orangeAccent.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: const Text('Manquante', style: TextStyle(fontSize: 11, color: Colors.orangeAccent, fontWeight: FontWeight.w600)),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _apiKeyController,
-                    obscureText: _obscureApiKey,
-                    style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace'),
-                    decoration: InputDecoration(
-                      hintText: 'Entrez votre clé API Gemini',
-                      hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
-                      filled: true,
-                      fillColor: const Color(0xFF161B22),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          _obscureApiKey ? Icons.visibility_off_rounded : Icons.visibility_rounded,
-                          color: Colors.white38, size: 18,
-                        ),
-                        onPressed: () => setState(() => _obscureApiKey = !_obscureApiKey),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: () async {
-                        final key = _apiKeyController.text.trim();
-                        if (key.isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Veuillez entrer une clé API'), backgroundColor: Colors.redAccent),
-                          );
-                          return;
-                        }
-                        await _storageService.saveApiKey(key);
-                        setState(() {
-                          _apiKey = key;
-                          _ocrService = OCRService(apiKey: key);
-                        });
-                        Navigator.pop(ctx);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Clé API enregistrée'), backgroundColor: Color(0xFF00BFA6)),
-                        );
-                      },
-                      icon: const Icon(Icons.save_rounded, size: 16),
-                      label: const Text('Enregistrer'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF00BFA6),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
 
             // Data Management section
             const Text('Gestion des données', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white54)),
@@ -761,10 +625,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
           ],
           IconButton(
-            icon: Icon(
-              _hasApiKey ? Icons.settings_rounded : Icons.key_rounded,
-              color: _hasApiKey ? null : Colors.orangeAccent,
-            ),
+            icon: const Icon(Icons.settings_rounded),
             tooltip: 'Paramètres',
             onPressed: () => _showSettings(),
           ),

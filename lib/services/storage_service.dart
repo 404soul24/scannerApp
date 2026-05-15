@@ -6,7 +6,6 @@ import '../models/absence_record.dart';
 
 class StorageService {
   static const String _historyKey = 'weekly_scan_history';
-  static const String _apiKeyKey = 'gemini_api_key';
 
   Future<List<WeeklyScanSession>> loadHistory() async {
     try {
@@ -46,16 +45,6 @@ class StorageService {
   Future<void> clearHistory() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_historyKey);
-  }
-
-  Future<String?> getApiKey() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_apiKeyKey);
-  }
-
-  Future<void> saveApiKey(String key) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_apiKeyKey, key);
   }
 
   Future<String> exportHistoryToJson() async {
