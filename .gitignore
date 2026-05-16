@@ -36,6 +36,9 @@ migrate_working_dir/
 # Environment variables
 .env
 
+# Supabase CLI temp files
+supabase/.temp/
+
 # Symbolication related
 app.*.symbols
 
