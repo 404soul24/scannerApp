@@ -10,6 +10,34 @@ if (!GEMINI_API_KEY) {
 const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
+// --- Rate limiter ---
+// In-memory: at most RATE_LIMIT requests per minute per IP
+const RATE_LIMIT = 10;
+const RATE_WINDOW_MS = 60_000;
+const requestLog = new Map<string, number[]>();
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const timestamps = requestLog.get(ip) ?? [];
+  const recent = timestamps.filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT) return true;
+  recent.push(now);
+  requestLog.set(ip, recent);
+  return false;
+}
+
+// --- Generic user-facing errors (never leak internals) ---
+const USER_ERRORS: Record<number, string> = {
+  400: "Requête invalide. Vérifiez l'image envoyée.",
+  429: "Trop de requêtes. Veuillez réessayer dans une minute.",
+  500: "Service temporairement indisponible. Veuillez réessayer.",
+  503: "Service saturé. Veuillez réessayer plus tard.",
+};
+
+function userFacingError(status: number, fallback?: string): string {
+  return USER_ERRORS[status] ?? fallback ?? "Erreur interne. Veuillez réessayer.";
+}
+
 const SYSTEM_INSTRUCTION =
   "Tu es un assistant spécialisé dans l'extraction de données de " +
   "feuilles d'absences scolaires. Tu dois analyser l'image fournie " +
@@ -176,6 +204,16 @@ async function callGemini(base64Image: string): Promise<string> {
 }
 
 Deno.serve(async (req) => {
+  // Rate limiting
+  const clientIp = req.headers.get("x-forwarded-for") ?? "unknown";
+  if (isRateLimited(clientIp)) {
+    console.warn(`Rate limit hit for ${clientIp}`);
+    return new Response(
+      JSON.stringify({ error: userFacingError(429) }),
+      { status: 429, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -214,17 +252,19 @@ Deno.serve(async (req) => {
       },
     });
   } catch (error) {
-    const err = error as Error;
-    console.error("Error:", err.message);
+    const err = error as Error; 
+    // Log full details server-side only — never leak to client
+    console.error("Error:", err.message, err.stack);
 
     const status = err.message.includes("503") ||
-        err.message.includes("high demand")
+        err.message.includes("high demand") ||
+        err.message.includes("Too Many Requests")
       ? 503
       : 500;
 
     return new Response(
       JSON.stringify({
-        error: err.message || "Internal server error",
+        error: userFacingError(status),
       }),
       {
         status,

@@ -46,19 +46,15 @@ class OCRService {
         },
         body: jsonEncode({'base64Image': base64Image}),
       );
-    } on http.ClientException catch (e) {
+    } on http.ClientException {
       throw Exception(
-        'Impossible de contacter le serveur: ${e.message}',
+        'Impossible de contacter le serveur. Vérifiez votre connexion internet.',
       );
     }
 
     if (response.statusCode != 200) {
-      final snippet = response.body.length > 200
-          ? response.body.substring(0, 200)
-          : response.body;
-      throw Exception(
-        'Erreur serveur (${response.statusCode}): $snippet',
-      );
+      final msg = _errorMessageForStatus(response.statusCode);
+      throw Exception(msg);
     }
 
     return _parseResponse(response.body);
@@ -126,4 +122,17 @@ class OCRService {
   }
 
   static const _orderedDays = ['LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM'];
+
+  String _errorMessageForStatus(int status) {
+    switch (status) {
+      case 400:
+        return 'Image invalide. Veuillez réessayer avec une autre photo.';
+      case 429:
+        return 'Trop de requêtes. Veuillez attendre une minute avant de réessayer.';
+      case 503:
+        return 'Le service est temporairement saturé. Veuillez réessayer plus tard.';
+      default:
+        return 'Erreur serveur. Veuillez réessayer ou contacter le support.';
+    }
+  }
 }
