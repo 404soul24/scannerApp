@@ -14,22 +14,71 @@ const SYSTEM_INSTRUCTION =
   "Tu es un assistant spécialisé dans l'extraction de données de " +
   "feuilles d'absences scolaires. Tu dois analyser l'image fournie " +
   "et retourner UNIQUEMENT un objet JSON valide, sans aucun texte " +
-  "avant ou après. Ne mets pas de blocs markdown (```json).";
+  "avant ou après. Ne mets pas de blocs markdown (```json). " +
+  "La précision géométrique est critique : chaque case d'absence " +
+  "doit être alignée à la bonne colonne de jour et à la bonne ligne d'élève. " +
+  "Avant toute lecture, identifie la grille complète du tableau " +
+  "(en-têtes de colonnes en haut, liste verticale des élèves). " +
+  "Ancre-toi aux en-têtes de jour (LUN, MAR, MER, JEU, VEN, SAM) " +
+  "et ne dévie JAMAIS de cette grille. Chaque ligne d'élève est " +
+  "strictement indépendante — ne propage jamais une marque vers " +
+  "le haut ou le bas.";
 
 const USER_PROMPT =
   "Analyse cette feuille d'absences hebdomadaire et extraits les informations suivantes.\n" +
   "\n" +
+  "--- RÈGLES GÉOMÉTRIQUES STRICTES ---\n" +
+  "\n" +
+  "1. ANCRAGE AUX EN-TÊTES : Repère d'abord la ligne des en-têtes de colonnes " +
+  "(LUN, MAR, MER, JEU, VEN, SAM) en haut du tableau. Utilise ces en-têtes " +
+  "comme ancrage horizontal fixe pour TOUTE l'extraction.\n" +
+  "\n" +
+  "2. LECTURE LIGNE PAR LIGNE : Parcours les élèves un par un, de haut en bas. " +
+  "Pour CHAQUE élève, lis horizontalement de gauche à droite sur SA ligne " +
+  "uniquement. Ne dérive PAS verticalement vers la ligne du dessus ou du dessous " +
+  "— chaque ligne est indépendante.\n" +
+  "\n" +
+  "3. ALIGNEMENT COLONNE-JOUR : Chaque case cochée appartient STRICTEMENT au jour " +
+  "de la colonne où elle se trouve, sur la ligne de l'élève courant. " +
+  "Si une marque est visuellement à cheval entre deux colonnes, attribue-la " +
+  "à la colonne dont le centre est le plus proche (ne jamais la dupliquer).\n" +
+  "\n" +
+   "4. SIGNATURES = PRÉSENT : Les cases vides, les traits de signature " +
+   "continu (une ligne qui traverse plusieurs cases), les paraphes, " +
+   "les mentions 'P' ou 'V', les cases avec un simple point, " +
+   "et tout marquage qui n'est PAS un marqueur d'absence explicite " +
+   "sont considérés comme Présent (is_absent = false).\n" +
+   "\n" +
+   '5. MARQUEURS D\'ABSENCE SEULEMENT : Seules les marques suivantes ' +
+   'comptent comme une absence de 2h30 : "X", "/", "A", "Abs", "☑", ' +
+   '"■" (case remplie entièrement), ou toute case clairement cochée ' +
+   'remplie d\'encre (pas un simple trait de signature, pas un point, ' +
+   'pas un "P" ou "V").\n' +
+   "\n" +
+   "6. VÉRIFICATION GRILLE : Pour chaque élève, confirme visuellement " +
+   "que les cases se trouvent bien dans la même ligne horizontale " +
+   "que son nom/prénom. Si le nom est à cheval entre deux lignes de " +
+   "cases, choisis la ligne supérieure.\n" +
+   "\n" +
+   "7. COLONNES VIDES = PRÉSENT : Si aucune case n'est cochée sur " +
+   "une ligne entière pour un jour donné, l'élève est présent ce " +
+   "jour-là (is_absent = false, absence_count = 0).\n" +
+   "\n" +
+   "8. INTERDICTION DE DÉCALAGE : Ne décale JAMAIS horizontalement " +
+   "les marques. Une marque dans la colonne MAR appartient au MAR, " +
+   "même si la colonne semble décalée visuellement. Utilise les " +
+   "en-têtes comme guide absolu.\n" +
+   "\n" +
+   "--- FIN DES RÈGLES ---\n" +
+  "\n" +
   "La feuille contient une liste d'élèves avec des cases à cocher pour chaque jour " +
   "(LUN, MAR, MER, JEU, VEN, SAM). Chaque jour a 4 créneaux.\n" +
   "\n" +
-  'Marques d\'absence à rechercher : "X", "/", "A", "Abs", "☑" ou toute case cochée.\n' +
-  'Ignore les cases vides ou les marques "P", "V" qui signifient présent.\n' +
-  "\n" +
   "Extrais TOUS les élèves de la feuille, même ceux qui n'ont aucune absence.\n" +
   "Pour chaque élève :\n" +
-  "1. is_absent = true si au moins une marque d'absence est trouvée.\n" +
-  "2. is_absent = false si aucune marque (cases vides ou marques de présence).\n" +
-  "3. absence_count = nombre total de marques d'absence (0 si présent).\n" +
+  "1. is_absent = true si au moins un marqueur d'absence est trouvé.\n" +
+  "2. is_absent = false si aucun marqueur (cases vides, signatures, P, V).\n" +
+  "3. absence_count = nombre total de marqueurs d'absence (0 si présent).\n" +
   "4. total_hours_absent = absence_count × 2.5 (0.0 si présent).\n" +
   "\n" +
   "Retourne UNIQUEMENT un objet JSON valide. Pas de blocs markdown.";

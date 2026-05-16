@@ -68,6 +68,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   final StorageService _storageService = StorageService();
 
   bool _isProcessing = false;
+  bool _isExporting = false;
   List<StudentAbsence> _students = [];
   String _rawText = '';
   File? _selectedImage;
@@ -307,7 +308,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     await Share.share(buffer.toString(), subject: "Absences Hebdomadaire");
   }
 
-  Future<void> _exportToCsv() async {
+  Future<void> _exportDetailedCsv() async {
     if (_students.isEmpty) return;
     
     final rows = <List<dynamic>>[
@@ -342,6 +343,53 @@ class _ScannerScreenState extends State<ScannerScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Export CSV réussi')),
       );
+    }
+  }
+
+  Future<void> _exportSessionToCSV() async {
+    if (_students.isEmpty) return;
+    
+    setState(() => _isExporting = true);
+    
+    try {
+      final rows = <List<dynamic>>[
+        ['Nom de l\'élève', 'Statut', 'Nombre d\'absences', 'Total heures absent'],
+      ];
+      
+      for (final student in _students) {
+        rows.add([
+          student.name,
+          student.hasAnyAbsence ? 'Absent' : 'Présent',
+          student.totalMarkedSlots,
+          (student.getTotalMinutes() / 60.0).toStringAsFixed(1),
+        ]);
+      }
+      
+      final csv = const ListToCsvConverter().convert(rows);
+      final directory = Directory.systemTemp;
+      final now = DateTime.now();
+      final timestamp = '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}';
+      final file = File('${directory.path}/absence_export_$timestamp.csv');
+      await file.writeAsString(csv);
+      
+      await Share.shareXFiles([XFile(file.path)], text: 'Exportation de la liste d\'absences');
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Export CSV réussi')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export CSV échoué: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
     }
   }
 
@@ -603,7 +651,10 @@ class _ScannerScreenState extends State<ScannerScreen>
               onSelected: (value) {
                 switch (value) {
                   case 'csv':
-                    _exportToCsv();
+                    _exportSessionToCSV();
+                    break;
+                  case 'csv_detailed':
+                    _exportDetailedCsv();
                     break;
                   case 'pdf':
                     _exportToPdf();
@@ -614,7 +665,8 @@ class _ScannerScreenState extends State<ScannerScreen>
                 }
               },
               itemBuilder: (ctx) => [
-                const PopupMenuItem(value: 'csv', child: Text('Exporter CSV')),
+                const PopupMenuItem(value: 'csv', child: Text('Exporter CSV (simple)')),
+                const PopupMenuItem(value: 'csv_detailed', child: Text('Exporter CSV (détaillé)')),
                 const PopupMenuItem(value: 'pdf', child: Text('Exporter PDF')),
                 const PopupMenuItem(value: 'share', child: Text('Partager')),
               ],
@@ -709,7 +761,9 @@ class _ScannerScreenState extends State<ScannerScreen>
 
           if (hasResults) ...[
             _buildInfoBar(),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
+            _buildExportActions(),
+            const SizedBox(height: 12),
             _buildSearchBar(),
             const SizedBox(height: 12),
             _buildStudentsCard(),
@@ -787,6 +841,26 @@ class _ScannerScreenState extends State<ScannerScreen>
           foregroundColor: Colors.white,
           minimumSize: const Size(double.infinity, 54),
         ),
+      ),
+    );
+  }
+
+  Widget _buildExportActions() {
+    return ElevatedButton.icon(
+      onPressed: (_students.isEmpty || _isExporting) ? null : _exportSessionToCSV,
+      icon: _isExporting
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            )
+          : const Icon(Icons.file_download_rounded, size: 20),
+      label: Text(_isExporting ? 'Exportation...' : 'Exporter en CSV'),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: const Color(0xFF00BFA6),
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        minimumSize: const Size(double.infinity, 48),
       ),
     );
   }
