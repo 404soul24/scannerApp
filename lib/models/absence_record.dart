@@ -237,7 +237,7 @@ class WeeklyScanSession {
             : DateTime.now(),
         students: (json['students'] as List?)
                 ?.map((s) => StudentAbsence.fromJson(s))
-                .toList() ??
+                .toList(),
         rawText: json['rawText'] ?? '',
       );
 }
