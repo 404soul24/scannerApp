@@ -37,7 +37,7 @@ class DailyAbsence {
   int getTotalMinutes() {
     int total = 0;
     for (var slot in slots) {
-      if (slot.isMarked && (slot.markType == 'X' || slot.markType == '/' || slot.markType == 'A')) {
+      if (slot.isMarked) {
         total += minutesPerSlot;
       }
     }
@@ -216,7 +216,7 @@ class WeeklyScanSession {
     List<StudentAbsence>? students,
     this.rawText = '',
   })  : scanDate = scanDate ?? DateTime.now(),
-        students = students ?? List.generate(15, (_) => StudentAbsence());
+        students = students ?? [];
 
   int getTotalAbsenceMinutes() {
     return students.fold(0, (sum, s) => sum + s.getTotalMinutes());
@@ -238,7 +238,6 @@ class WeeklyScanSession {
         students: (json['students'] as List?)
                 ?.map((s) => StudentAbsence.fromJson(s))
                 .toList() ??
-            List.generate(15, (_) => StudentAbsence()),
         rawText: json['rawText'] ?? '',
       );
 }

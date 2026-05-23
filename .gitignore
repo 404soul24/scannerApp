@@ -39,6 +39,9 @@ migrate_working_dir/
 # Supabase CLI temp files
 supabase/.temp/
 
+# opencode config (may contain API keys)
+opencode.json
+
 # Symbolication related
 app.*.symbols
 

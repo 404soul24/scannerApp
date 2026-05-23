@@ -11,6 +11,11 @@ import 'ocr_service.dart';
 import 'models/absence_record.dart';
 import 'services/storage_service.dart';
 
+String _cleanError(Object e) {
+  final s = e.toString();
+  return s.startsWith('Exception: ') ? s.substring(11) : s;
+}
+
 void main() {
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
@@ -138,7 +143,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export échoué: $e')),
+          SnackBar(content: Text('Export échoué: ${_cleanError(e)}')),
         );
       }
     }
@@ -169,7 +174,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Import échoué: $e'), backgroundColor: Colors.redAccent),
+          SnackBar(content: Text('Import échoué: ${_cleanError(e)}'), backgroundColor: Colors.redAccent),
         );
       }
     }
@@ -210,7 +215,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Échec de l'analyse : $e"),
+            content: Text("Échec de l'analyse : ${_cleanError(e)}"),
             backgroundColor: Colors.redAccent,
             duration: const Duration(seconds: 6),
             action: SnackBarAction(
@@ -245,7 +250,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Échec de l'analyse : $e"),
+            content: Text("Échec de l'analyse : ${_cleanError(e)}"),
             backgroundColor: Colors.redAccent,
           ),
         );
@@ -284,65 +289,86 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   Future<void> _shareResults() async {
     if (_students.isEmpty) return;
-    final buffer = StringBuffer();
-    buffer.writeln('Absences hebdomadaire');
-    buffer.writeln('Durée par case: 150 min (2h30)');
-    buffer.writeln('');
-
-    for (final student in _students) {
-      if (!student.hasAnyAbsence) continue;
-      final total = student.formatTotalDuration();
-      buffer.writeln('${student.number}. ${student.name} - $total');
-      for (final day in student.week) {
-        final mins = day.getTotalMinutes();
-        if (mins > 0) {
-          final hours = mins ~/ 60;
-          final min = mins % 60;
-          final duration = hours > 0 ? '${hours}h ${min}min' : '${min}min';
-          buffer.writeln('   ${day.dayName}: $duration (${day.getDisplayMarks()})');
-        }
-      }
+    try {
+      final buffer = StringBuffer();
+      buffer.writeln('Absences hebdomadaire');
+      buffer.writeln('Durée par case: 150 min (2h30)');
       buffer.writeln('');
-    }
 
-    await Share.share(buffer.toString(), subject: "Absences Hebdomadaire");
+      for (final student in _students) {
+        if (!student.hasAnyAbsence) continue;
+        final total = student.formatTotalDuration();
+        buffer.writeln('${student.number}. ${student.name} - $total');
+        for (final day in student.week) {
+          final mins = day.getTotalMinutes();
+          if (mins > 0) {
+            final hours = mins ~/ 60;
+            final min = mins % 60;
+            final duration = hours > 0 ? '${hours}h ${min}min' : '${min}min';
+            buffer.writeln('   ${day.dayName}: $duration (${day.getDisplayMarks()})');
+          }
+        }
+        buffer.writeln('');
+      }
+
+      await Share.share(buffer.toString(), subject: "Absences Hebdomadaire");
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Partage échoué: ${_cleanError(e)}'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _exportDetailedCsv() async {
     if (_students.isEmpty) return;
-    
-    final rows = <List<dynamic>>[
-      ['N°', 'Nom', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'Total Heures'],
-    ];
-    
-    for (final student in _students) {
-      final row = <dynamic>[
-        student.number,
-        student.name,
+    try {
+      final rows = <List<dynamic>>[
+        ['N°', 'Nom', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'Total Heures'],
       ];
       
-      for (final day in student.week) {
-        row.add(day.markedCount > 0 ? '${day.markedCount}x (${day.getDisplayMarks()})' : '-');
+      for (final student in _students) {
+        final row = <dynamic>[
+          student.number,
+          student.name,
+        ];
+        
+        for (final day in student.week) {
+          row.add(day.markedCount > 0 ? '${day.markedCount}x (${day.getDisplayMarks()})' : '-');
+        }
+        
+        final total = student.formatTotalDuration();
+        row.add(total);
+        
+        rows.add(row);
       }
       
-      final total = student.formatTotalDuration();
-      row.add(total);
+      final csv = const ListToCsvConverter().convert(rows);
+      final directory = await getApplicationDocumentsDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final file = File('${directory.path}/absences_$timestamp.csv');
+      await file.writeAsString(csv);
       
-      rows.add(row);
-    }
-    
-    final csv = const ListToCsvConverter().convert(rows);
-    final directory = await getApplicationDocumentsDirectory();
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final file = File('${directory.path}/absences_$timestamp.csv');
-    await file.writeAsString(csv);
-    
-    await Share.shareXFiles([XFile(file.path)], subject: 'Export CSV');
-    
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Export CSV réussi')),
-      );
+      await Share.shareXFiles([XFile(file.path)], subject: 'Export CSV');
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Export CSV détaillé réussi')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export CSV échoué: ${_cleanError(e)}'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 
@@ -383,7 +409,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Export CSV échoué: $e'),
+            content: Text('Export CSV échoué: ${_cleanError(e)}'),
             backgroundColor: Colors.redAccent,
           ),
         );
@@ -395,58 +421,68 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   Future<void> _exportToPdf() async {
     if (_students.isEmpty) return;
-    
-    final pdf = pw.Document();
-    
-    pdf.addPage(
-      pw.Page(
-        pageFormat: PdfPageFormat.a4,
-        build: (context) {
-          return pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Header(
-                level: 0,
-                child: pw.Text('Feuille d\'Absences Hebdomadaire', 
-                  style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
-              ),
-              pw.SizedBox(height: 10),
-              pw.Text('Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}'),
-              pw.Text('Durée par case: 2h30 (150 min)'),
-              pw.SizedBox(height: 20),
-              pw.TableHelper.fromTextArray(
-                headers: ['N°', 'Nom', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'Total'],
-                data: _students.where((s) => s.hasAnyAbsence).map((student) {
-                  return [
-                    student.number.toString(),
-                    student.name,
-                    student.week[0].markedCount.toString(),
-                    student.week[1].markedCount.toString(),
-                    student.week[2].markedCount.toString(),
-                    student.week[3].markedCount.toString(),
-                    student.week[4].markedCount.toString(),
-                    student.week[5].markedCount.toString(),
-                    student.formatTotalDuration(),
-                  ];
-                }).toList(),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-    
-    final directory = await getApplicationDocumentsDirectory();
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final file = File('${directory.path}/absences_$timestamp.pdf');
-    await file.writeAsBytes(await pdf.save());
-    
-    await Share.shareXFiles([XFile(file.path)], subject: 'Export PDF');
-    
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Export PDF réussi')),
+    try {
+      final pdf = pw.Document();
+      
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          build: (context) {
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Header(
+                  level: 0,
+                  child: pw.Text('Feuille d\'Absences Hebdomadaire', 
+                    style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+                ),
+                pw.SizedBox(height: 10),
+                pw.Text('Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}'),
+                pw.Text('Durée par case: 2h30 (150 min)'),
+                pw.SizedBox(height: 20),
+                pw.TableHelper.fromTextArray(
+                  headers: ['N°', 'Nom', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'Total'],
+                  data: _students.where((s) => s.hasAnyAbsence).map((student) {
+                    return [
+                      student.number.toString(),
+                      student.name,
+                      student.week[0].markedCount.toString(),
+                      student.week[1].markedCount.toString(),
+                      student.week[2].markedCount.toString(),
+                      student.week[3].markedCount.toString(),
+                      student.week[4].markedCount.toString(),
+                      student.week[5].markedCount.toString(),
+                      student.formatTotalDuration(),
+                    ];
+                  }).toList(),
+                ),
+              ],
+            );
+          },
+        ),
       );
+      
+      final directory = await getApplicationDocumentsDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final file = File('${directory.path}/absences_$timestamp.pdf');
+      await file.writeAsBytes(await pdf.save());
+      
+      await Share.shareXFiles([XFile(file.path)], subject: 'Export PDF');
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Export PDF réussi')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export PDF échoué: ${_cleanError(e)}'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 

@@ -257,9 +257,10 @@ Deno.serve(async (req) => {
     console.error("Error:", err.message, err.stack);
 
     const status = err.message.includes("503") ||
-        err.message.includes("high demand") ||
-        err.message.includes("Too Many Requests")
+        err.message.includes("high demand")
       ? 503
+      : err.message.includes("Too Many Requests")
+      ? 429
       : 500;
 
     return new Response(
