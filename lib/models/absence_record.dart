@@ -191,6 +191,30 @@ class StudentAbsence {
             ],
       );
 
+  factory StudentAbsence.fromCounts({
+    required int number,
+    required String name,
+    required int absenceCount,
+  }) {
+    const orderedDays = ['LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM'];
+    final week = orderedDays
+        .map((dayName) => DailyAbsence(dayName: dayName))
+        .toList();
+
+    if (absenceCount > 0) {
+      int slotsToMark = absenceCount > 24 ? 24 : absenceCount;
+      int marked = 0;
+      for (int d = 0; d < week.length && marked < slotsToMark; d++) {
+        for (int s = 0; s < 4 && marked < slotsToMark; s++) {
+          week[d].slots[s] = AbsenceSlot(isMarked: true, markType: 'X');
+          marked++;
+        }
+      }
+    }
+
+    return StudentAbsence(number: number, name: name, week: week);
+  }
+
   StudentAbsence copyWith({
     int? number,
     String? name,

@@ -1,2 +1,0 @@
-[info] Unnecessary use of multiple underscores (C:\Users\lenovo\StudioProjects\absence_scanner_app\lib\main.dart:499:39)
-[warning] Unused import: 'package:flutter/material.dart' (C:\Users\lenovo\StudioProjects\absence_scanner_app\test\widget_test.dart:3:8)

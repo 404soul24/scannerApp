@@ -1,17 +1,44 @@
 // Supabase Edge Function: scan-absence
 // Acts as a secure proxy to Google Gemini 2.5 Flash API.
-// The Gemini API key is stored as a server-side secret, not exposed to clients.
+// Verifies the caller's JWT and enforces authenticated access.
+
+import { create, verify, type Payload } from "https://deno.land/x/djwt@v3.0.1/mod.ts";
 
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 if (!GEMINI_API_KEY) {
   throw new Error("GEMINI_API_KEY environment variable is not set");
 }
 
+const SUPABASE_JWT_SECRET = Deno.env.get("SUPABASE_JWT_SECRET");
+if (!SUPABASE_JWT_SECRET) {
+  throw new Error("SUPABASE_JWT_SECRET environment variable is not set");
+}
+
 const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
+// --- JWT Verification using djwt ---
+async function verifyJwt(
+  token: string,
+  secret: string
+): Promise<{ valid: boolean; payload?: Payload; error?: string }> {
+  try {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+
+    const payload = await verify(token, key);
+    return { valid: true, payload };
+  } catch (e) {
+    return { valid: false, error: `JWT verification failed: ${(e as Error).message}` };
+  }
+}
+
 // --- Rate limiter ---
-// In-memory: at most RATE_LIMIT requests per minute per IP
 const RATE_LIMIT = 10;
 const RATE_WINDOW_MS = 60_000;
 const requestLog = new Map<string, number[]>();
@@ -71,33 +98,33 @@ const USER_PROMPT =
   "Si une marque est visuellement à cheval entre deux colonnes, attribue-la " +
   "à la colonne dont le centre est le plus proche (ne jamais la dupliquer).\n" +
   "\n" +
-   "4. SIGNATURES = PRÉSENT : Les cases vides, les traits de signature " +
-   "continu (une ligne qui traverse plusieurs cases), les paraphes, " +
-   "les mentions 'P' ou 'V', les cases avec un simple point, " +
-   "et tout marquage qui n'est PAS un marqueur d'absence explicite " +
-   "sont considérés comme Présent (is_absent = false).\n" +
-   "\n" +
-   '5. MARQUEURS D\'ABSENCE SEULEMENT : Seules les marques suivantes ' +
-   'comptent comme une absence de 2h30 : "X", "/", "A", "Abs", "☑", ' +
-   '"■" (case remplie entièrement), ou toute case clairement cochée ' +
-   'remplie d\'encre (pas un simple trait de signature, pas un point, ' +
-   'pas un "P" ou "V").\n' +
-   "\n" +
-   "6. VÉRIFICATION GRILLE : Pour chaque élève, confirme visuellement " +
-   "que les cases se trouvent bien dans la même ligne horizontale " +
-   "que son nom/prénom. Si le nom est à cheval entre deux lignes de " +
-   "cases, choisis la ligne supérieure.\n" +
-   "\n" +
-   "7. COLONNES VIDES = PRÉSENT : Si aucune case n'est cochée sur " +
-   "une ligne entière pour un jour donné, l'élève est présent ce " +
-   "jour-là (is_absent = false, absence_count = 0).\n" +
-   "\n" +
-   "8. INTERDICTION DE DÉCALAGE : Ne décale JAMAIS horizontalement " +
-   "les marques. Une marque dans la colonne MAR appartient au MAR, " +
-   "même si la colonne semble décalée visuellement. Utilise les " +
-   "en-têtes comme guide absolu.\n" +
-   "\n" +
-   "--- FIN DES RÈGLES ---\n" +
+  "4. SIGNATURES = PRÉSENT : Les cases vides, les traits de signature " +
+  "continu (une ligne qui traverse plusieurs cases), les paraphes, " +
+  "les mentions 'P' ou 'V', les cases avec un simple point, " +
+  "et tout marquage qui n'est PAS un marqueur d'absence explicite " +
+  "sont considérés comme Présent (is_absent = false).\n" +
+  "\n" +
+  "5. MARQUEURS D'ABSENCE SEULEMENT : Seules les marques suivantes " +
+  "comptent comme une absence de 2h30 : \"X\", \"/\", \"A\", \"Abs\", \"☑\", " +
+  "\"■\" (case remplie entièrement), ou toute case clairement cochée " +
+  "remplie d'encre (pas un simple trait de signature, pas un point, " +
+  "pas un \"P\" ou \"V\").\n" +
+  "\n" +
+  "6. VÉRIFICATION GRILLE : Pour chaque élève, confirme visuellement " +
+  "que les cases se trouvent bien dans la même ligne horizontale " +
+  "que son nom/prénom. Si le nom est à cheval entre deux lignes de " +
+  "cases, choisis la ligne supérieure.\n" +
+  "\n" +
+  "7. COLONNES VIDES = PRÉSENT : Si aucune case n'est cochée sur " +
+  "une ligne entière pour un jour donné, l'élève est présent ce " +
+  "jour-là (is_absent = false, absence_count = 0).\n" +
+  "\n" +
+  "8. INTERDICTION DE DÉCALAGE : Ne décale JAMAIS horizontalement " +
+  "les marques. Une marque dans la colonne MAR appartient au MAR, " +
+  "même si la colonne semble décalée visuellement. Utilise les " +
+  "en-têtes comme guide absolu.\n" +
+  "\n" +
+  "--- FIN DES RÈGLES ---\n" +
   "\n" +
   "La feuille contient une liste d'élèves avec des cases à cocher pour chaque jour " +
   "(LUN, MAR, MER, JEU, VEN, SAM). Chaque jour a 4 créneaux.\n" +
@@ -153,7 +180,8 @@ const RESPONSE_SCHEMA = {
   required: ["scanned_date", "total_students_count", "students"],
 };
 
-async function callGemini(base64Image: string): Promise<string> {
+async function callGemini(base64Image: string, mimeType?: string): Promise<string> {
+  const effectiveMimeType = mimeType ?? "image/jpeg";
   const body = {
     system_instruction: {
       parts: [{ text: SYSTEM_INSTRUCTION }],
@@ -164,7 +192,7 @@ async function callGemini(base64Image: string): Promise<string> {
           { text: USER_PROMPT },
           {
             inline_data: {
-              mime_type: "image/jpeg",
+              mime_type: effectiveMimeType,
               data: base64Image,
             },
           },
@@ -192,28 +220,16 @@ async function callGemini(base64Image: string): Promise<string> {
 
   const data = await response.json();
 
-  // Extract the text from Gemini's response structure
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
     throw new Error("Gemini returned empty response");
   }
 
-  // Validate it's parseable JSON
   JSON.parse(text);
   return text;
 }
 
 Deno.serve(async (req) => {
-  // Rate limiting
-  const clientIp = req.headers.get("x-forwarded-for") ?? "unknown";
-  if (isRateLimited(clientIp)) {
-    console.warn(`Rate limit hit for ${clientIp}`);
-    return new Response(
-      JSON.stringify({ error: userFacingError(429) }),
-      { status: 429, headers: { "Content-Type": "application/json" } }
-    );
-  }
-
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -225,6 +241,39 @@ Deno.serve(async (req) => {
     });
   }
 
+  // Verify JWT
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return new Response(
+      JSON.stringify({ error: "Non authentifié. Veuillez vous connecter." }),
+      { status: 401, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const token = authHeader.substring(7);
+  const jwtResult = await verifyJwt(token, SUPABASE_JWT_SECRET!);
+
+  if (!jwtResult.valid) {
+    console.warn(`Invalid JWT: ${jwtResult.error}`);
+    return new Response(
+      JSON.stringify({ error: "Session expirée. Veuillez vous reconnecter." }),
+      { status: 401, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const userId = jwtResult.payload?.sub as string | undefined;
+  console.log(`Authenticated request from user: ${userId}`);
+
+  // Rate limiting
+  const clientIp = req.headers.get("x-forwarded-for") ?? "unknown";
+  if (isRateLimited(clientIp)) {
+    console.warn(`Rate limit hit for ${clientIp}`);
+    return new Response(
+      JSON.stringify({ error: userFacingError(429) }),
+      { status: 429, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
@@ -233,7 +282,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { base64Image } = await req.json();
+    const { base64Image, mimeType } = await req.json();
 
     if (!base64Image || typeof base64Image !== "string") {
       return new Response(
@@ -242,7 +291,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    const result = await callGemini(base64Image);
+    const result = await callGemini(base64Image, mimeType);
 
     return new Response(result, {
       status: 200,
@@ -252,8 +301,7 @@ Deno.serve(async (req) => {
       },
     });
   } catch (error) {
-    const err = error as Error; 
-    // Log full details server-side only — never leak to client
+    const err = error as Error;
     console.error("Error:", err.message, err.stack);
 
     const status = err.message.includes("503") ||

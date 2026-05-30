@@ -13,14 +13,17 @@ dependencies:
 
   cupertino_icons: ^1.0.8
 
+  # Supabase Flutter SDK (Auth, Database, Realtime)
+  supabase_flutter: ^2.8.4
+
   # HTTP client for Supabase Edge Function calls
   http: ^1.3.0
 
   # Image picking from camera or gallery
-  image_picker: ^1.1.2
+  image_picker: ^1.2.2
 
   # Share absent list
-  share_plus: ^10.1.4
+  share_plus: ^13.1.0
 
   # Local storage for scan history
   shared_preferences: ^2.3.5
@@ -32,10 +35,10 @@ dependencies:
   pdf: ^3.11.2
 
   # CSV export
-  csv: ^6.0.0
+  csv: ^8.0.0
 
   # File picker for import
-  file_picker: ^8.1.7
+  file_picker: ^12.0.0-beta.5
 
 dev_dependencies:
   flutter_test:

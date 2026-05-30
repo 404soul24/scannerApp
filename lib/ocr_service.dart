@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'models/absence_record.dart';
 
 class ScanResult {
@@ -21,8 +22,8 @@ class OCRService {
   static const String _functionUrl =
       'https://xpsuryegelcfwjwpmxud.supabase.co/functions/v1/scan-absence';
 
-  static const String _anonKey =
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhwc3VyeWVnZWxjZndqd3BteHVkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NjI0NzIsImV4cCI6MjA5NDQzODQ3Mn0.Lc2YvNa72BylvMTvvgFFmsIohWCf9G75GqEZGoUJ8W0';
+  String? get _accessToken =>
+      Supabase.instance.client.auth.currentSession?.accessToken;
 
   Future<ScanResult> analyzeSheet(File imageFile) async {
     final imageBytes = await imageFile.readAsBytes();
@@ -36,15 +37,23 @@ class OCRService {
 
     final base64Image = base64Encode(imageBytes);
 
+    final token = _accessToken;
+    if (token == null) {
+      throw Exception('Non authentifié. Veuillez vous reconnecter.');
+    }
+
+    final path = imageFile.path.toLowerCase();
+    final mimeType = path.endsWith('.png') ? 'image/png' : 'image/jpeg';
+
     final http.Response response;
     try {
       response = await http.post(
         Uri.parse(_functionUrl),
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer $_anonKey',
+          'Authorization': 'Bearer $token',
         },
-        body: jsonEncode({'base64Image': base64Image}),
+        body: jsonEncode({'base64Image': base64Image, 'mimeType': mimeType}),
       );
     } on http.ClientException {
       throw Exception(
@@ -101,27 +110,12 @@ class OCRService {
 
   StudentAbsence _buildStudent(int number, String name, bool isAbsent,
       int absenceCount, num totalHours) {
-    final week = _orderedDays
-        .map((dayName) => DailyAbsence(dayName: dayName))
-        .toList();
-
-    if (isAbsent && absenceCount > 0) {
-      int slotsToMark = absenceCount;
-      if (slotsToMark > 24) slotsToMark = 24;
-
-      int marked = 0;
-      for (int d = 0; d < week.length && marked < slotsToMark; d++) {
-        for (int s = 0; s < 4 && marked < slotsToMark; s++) {
-          week[d].slots[s] = AbsenceSlot(isMarked: true, markType: 'X');
-          marked++;
-        }
-      }
-    }
-
-    return StudentAbsence(number: number, name: name, week: week);
+    return StudentAbsence.fromCounts(
+      number: number,
+      name: name,
+      absenceCount: isAbsent ? absenceCount : 0,
+    );
   }
-
-  static const _orderedDays = ['LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM'];
 
   String _errorMessageForStatus(int status) {
     switch (status) {
